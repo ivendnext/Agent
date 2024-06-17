@@ -1,17 +1,17 @@
-
-name: Sync-Master-Branch
+name: sync-frappe-master-branch
 on:
   schedule:
     # Run the job daily at 00:00 UTC
     - cron: '0 0 * * *'
   workflow_dispatch:
+    # This allows to run the actions manually 
 
 jobs:
-  Sync-Master-Branch:
+  sync-frappe-master-branch:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Pull From Frappe Public Repo and Push to Private Repo
+      - name: Pull from frappe master branch and Push to iVendNext master branch
         env:
           SUPER_SECRET: ${{ secrets.MNJ_GITHUB_TOKEN }}
         run: | 
