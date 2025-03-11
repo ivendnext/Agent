@@ -383,8 +383,10 @@ class Site(Base):
         return self.bench_execute(command)
 
     @job("Update Site Configuration", priority="high")
-    def update_config_job(self, value, remove):
+    def update_config_job(self, value, remove, clear_cache=False):
         self.update_config(value, remove)
+        if clear_cache:
+            self.clear_cache()
 
     @job("Reset Site Usage", priority="high")
     def reset_site_usage_job(self):

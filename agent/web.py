@@ -823,7 +823,7 @@ def archive_site(bench, site):
 @validate_bench_and_site
 def site_update_config(bench, site):
     data = request.json
-    job = Server().benches[bench].sites[site].update_config_job(data["config"], data["remove"])
+    job = Server().benches[bench].sites[site].update_config_job(data["config"], data["remove"], data.get("clear_cache", False))
     return {"job": job}
 
 
