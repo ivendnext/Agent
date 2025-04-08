@@ -10,7 +10,7 @@ upstream {{ bench_name}}-socketio-server {
 {% if for_devbox %}
 
 upstream {{ bench_name}}-code-server {
-	server 127.0.0.1:{{ code_server_port }} fail_timeout=0;
+	server 127.0.0.1:{{ ivend_codeserver_port }} fail_timeout=0;
 }
 
 {% endif %}

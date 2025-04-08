@@ -489,6 +489,7 @@ class Bench(Base):
             "tls_protocols": self.server.config.get("tls_protocols"),
             "code_server": codeserver,
             "for_devbox": self.for_devbox,
+            "ivend_codeserver_port": self.bench_config["ivend_codeserver_port"],
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
 
