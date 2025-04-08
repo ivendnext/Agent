@@ -54,6 +54,7 @@ class Bench(Base):
         self.config_file = os.path.join(self.directory, "sites", "common_site_config.json")
         self.host = self.config.get("db_host", "localhost")
         self.docker_image = self.bench_config.get("docker_image")
+        self.for_devbox - self.bench_config.get("for_devbox", False)
         self.mounts = mounts
         if not (
             os.path.isdir(self.directory)
@@ -470,6 +471,8 @@ class Bench(Base):
 
         codeserver = _get_codeserver_config(self.directory)
 
+        # TODO: add routing rule for /vscode
+
         config = {
             "bench_name": self.name,
             "bench_name_slug": self.name.replace("-", "_"),
@@ -485,6 +488,7 @@ class Bench(Base):
             "nginx_directory": self.server.nginx_directory,
             "tls_protocols": self.server.config.get("tls_protocols"),
             "code_server": codeserver,
+            "for_devbox": self.for_devbox,
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
 
@@ -703,10 +707,10 @@ class Bench(Base):
                 f"--restart always --hostname {self.name} "
                 f"-p 127.0.0.1:{self.bench_config['web_port']}:8000 "
                 f"-p 127.0.0.1:{self.bench_config['socketio_port']}:9000 "
-                f"-p 127.0.0.1:{self.bench_config['codeserver_port']}:8088 "
+                f"-p 127.0.0.1:{self.bench_config['codeserver_port']}:8088 " # TODO: change this port
                 f"-p {ssh_ip}:{ssh_port}:2200 "
                 f"-v {self.sites_directory}:{bench_directory}/sites "
-                f"-v {self.logs_directory}:{bench_directory}/logs "
+                f"-v {self.logs_directory}:{bench_directory}/logs " # TODO: this can be removed for devbox
                 f"-v {self.config_directory}:{bench_directory}/config "
                 f"{mounts} "
                 f"--name {self.name} {self.bench_config['docker_image']}"

@@ -7,6 +7,14 @@ upstream {{ bench_name}}-socketio-server {
 	server 127.0.0.1:{{ socketio_port }} fail_timeout=0;
 }
 
+{% if for_devbox %}
+
+upstream {{ bench_name}}-code-server {
+	server 127.0.0.1:{{ code_server_port }} fail_timeout=0;
+}
+
+{% endif %}
+
 map $host $site_name_{{ bench_name_slug }} {
 
 	{% for (from, to) in domains.items() -%}
@@ -208,6 +216,18 @@ server {
 
 		proxy_pass http://{{ bench_name }}-socketio-server;
 	}
+
+	{% if for_devbox %}
+
+	location /vscode {
+		proxy_http_version 1.1;
+		proxy_set_header Origin https://$http_host;
+		proxy_set_header Host $host;
+
+		proxy_pass http://{{ bench_name }}-code-server;
+	}
+
+	{% endif %}
 
 	location / {
 
