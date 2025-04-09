@@ -54,7 +54,7 @@ class Bench(Base):
         self.config_file = os.path.join(self.directory, "sites", "common_site_config.json")
         self.host = self.config.get("db_host", "localhost")
         self.docker_image = self.bench_config.get("docker_image")
-        self.for_devbox - self.bench_config.get("for_devbox", False)
+        self.for_devbox = self.bench_config.get("for_devbox", False)
         self.mounts = mounts
         if not (
             os.path.isdir(self.directory)
