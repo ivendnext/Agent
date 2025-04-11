@@ -188,6 +188,13 @@ class Bench(Base):
 
     @step("New Site")
     def bench_new_site(self, name, mariadb_root_password, admin_password):
+        if self.for_devbox:
+            return self.docker_execute(
+                f"bench new-site "
+                f"--mariadb-root-password {mariadb_root_password} "
+                f"--admin-password {admin_password} {name}"
+            )
+
         site_database, temp_user, temp_password = self.create_mariadb_user(name, mariadb_root_password)
         try:
             return self.docker_execute(
@@ -489,7 +496,7 @@ class Bench(Base):
             "tls_protocols": self.server.config.get("tls_protocols"),
             "code_server": codeserver,
             "for_devbox": self.for_devbox,
-            "ivend_codeserver_port": self.bench_config["ivend_codeserver_port"],
+            "ivend_codeserver_port": self.bench_config["codeserver_port"], #TODO: change this
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
 
