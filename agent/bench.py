@@ -188,13 +188,6 @@ class Bench(Base):
 
     @step("New Site")
     def bench_new_site(self, name, mariadb_root_password, admin_password):
-        if self.for_devbox:
-            return self.docker_execute(
-                f"bench new-site "
-                f"--mariadb-root-password {mariadb_root_password} "
-                f"--admin-password {admin_password} {name}"
-            )
-
         site_database, temp_user, temp_password = self.create_mariadb_user(name, mariadb_root_password)
         try:
             return self.docker_execute(
@@ -206,6 +199,14 @@ class Bench(Base):
             )
         finally:
             self.drop_mariadb_user(name, mariadb_root_password, site_database)
+
+    @step("New Site")
+    def bench_new_devbox_site(self, name, mariadb_root_password, admin_password):
+        return self.docker_execute(
+            f"bench new-site "
+            f"--mariadb-root-password {mariadb_root_password} "
+            f"--admin-password {admin_password} {name}"
+        )
 
     @job("Create User", priority="high")
     def create_user(
@@ -349,7 +350,8 @@ class Bench(Base):
         admin_password,
         create_user: dict | None = None,
     ):
-        self.bench_new_site(name, mariadb_root_password, admin_password)
+        new_site = self.bench_new_devbox_site if self.for_devbox else self.bench_new_site
+        new_site(name, mariadb_root_password, admin_password)
         site = Site(name, self)
         site.install_apps(apps)
         site.update_config(config)
