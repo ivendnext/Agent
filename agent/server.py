@@ -90,7 +90,7 @@ class Server(Base):
         self.bench_init(name, bench_config)
         bench = Bench(name, self, mounts=mounts)
         bench.update_config(common_site_config, bench_config)
-        if bench.bench_config.get("single_container"):
+        if bench.bench_config.get("single_container") and not bench.for_devbox:
             bench.generate_supervisor_config()
         bench.deploy()
         bench.setup_nginx()
