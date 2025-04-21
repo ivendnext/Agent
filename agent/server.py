@@ -119,7 +119,7 @@ class Server(Base):
             if not e.filename.endswith("common_site_config.json"):
                 raise
         else:
-            if bench.sites:
+            if bench.sites and not bench.for_devbox:
                 raise Exception(f"Bench has sites: {bench.sites}")
             bench.disable_production()
         self.container_exists(name)

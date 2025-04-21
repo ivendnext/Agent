@@ -572,7 +572,8 @@ class Bench(Base):
         self.update_config(common_site_config, bench_config)
         self.setup_nginx()
         if self.bench_config.get("single_container"):
-            self.update_supervisor()
+            if not self.for_devbox:
+                self.update_supervisor()
             self.update_runtime_limits()
             if (old_config["web_port"] != bench_config["web_port"]) or (
                 old_config["socketio_port"] != bench_config["socketio_port"]

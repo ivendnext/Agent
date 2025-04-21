@@ -221,7 +221,7 @@ server {
 
 	location /vscode/ {
 		rewrite ^/vscode(/.*)$ $1 break;
-		http://{{ bench_name }}-code-server;
+		proxy_pass http://{{ bench_name }}-code-server;
 		proxy_set_header Host $host;
 		proxy_set_header Upgrade $http_upgrade;
 		proxy_set_header Connection upgrade;
