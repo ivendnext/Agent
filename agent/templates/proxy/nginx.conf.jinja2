@@ -330,10 +330,10 @@ server {
 	listen 127.0.0.1:10094;
 
 	root {{ error_pages_directory }};
-	error_page 503 /restricted.html;
+	error_page 425 /restricted.html;
 
 	location / {
-		return 503;
+		return 425;
 	}
 
 	location = /restricted.html {
