@@ -381,7 +381,8 @@ class Bench(Base):
         skip_failing_patches,
     ):
         files = self.download_files(name, database, public, private)
-        self.bench_new_site(name, mariadb_root_password, admin_password)
+        new_site = self.bench_new_site if not self.for_devbox else self.bench_new_devbox_site
+        new_site(name, mariadb_root_password, admin_password)
         site = Site(name, self)
         site.update_config(default_config)
         try:
