@@ -90,7 +90,7 @@ class Server(Base):
         self.bench_init(name, bench_config)
         bench = Bench(name, self, mounts=mounts)
         bench.update_config(common_site_config, bench_config)
-        if bench.bench_config.get("single_container"):
+        if bench.bench_config.get("single_container") and not bench.for_devbox:
             bench.generate_supervisor_config()
         bench.deploy()
         bench.setup_nginx()
@@ -119,7 +119,7 @@ class Server(Base):
             if not e.filename.endswith("common_site_config.json"):
                 raise
         else:
-            if bench.sites:
+            if bench.sites and not bench.for_devbox:
                 raise Exception(f"Bench has sites: {bench.sites}")
             bench.disable_production()
         self.container_exists(name)
