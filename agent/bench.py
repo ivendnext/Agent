@@ -275,9 +275,11 @@ class Bench(Base):
             f"GRANT ALL ON {database}.* TO '{user}'@'%' WITH GRANT OPTION",
             "FLUSH PRIVILEGES",
         ]
+        # execute inside container for devbox
+        execute_f = self.execute if not self.for_devbox else self.docker_execute
         for query in queries:
             command = f'mysql -h {self.host} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
-            self.execute(command)
+            execute_f(command)
         return database, user, password
 
     def drop_mariadb_user(self, site, mariadb_root_password, database=None):
@@ -288,9 +290,11 @@ class Bench(Base):
             f"DROP USER IF EXISTS '{user}'@'%'",
             "FLUSH PRIVILEGES",
         ]
+        # execute inside container for devbox
+        execute_f = self.execute if not self.for_devbox else self.docker_execute
         for query in queries:
             command = f'mysql -h {self.host} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
-            self.execute(command)
+            execute_f(command)
 
     def fetch_monitor_data(self):
         lines = []
