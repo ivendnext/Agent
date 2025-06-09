@@ -159,6 +159,7 @@ class Site(Base):
         public,
         private,
         skip_failing_patches,
+        site_config,
     ):
         files = self.bench.download_files(self.name, database, public, private)
         try:
@@ -169,6 +170,8 @@ class Site(Base):
                 files["public"],
                 files["private"],
             )
+            if site_config:
+                self.update_config(json.loads(site_config))
         except Exception:
             self.calculate_checksum_of_backup_files(files["database"], files["public"], files["private"])
             raise

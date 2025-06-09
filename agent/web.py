@@ -428,6 +428,7 @@ def restore_site(bench, site):
             data.get("public"),
             data.get("private"),
             data.get("skip_failing_patches", False),
+            data.get("site_config"),
         )
     )
     return {"job": job}
