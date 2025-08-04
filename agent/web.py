@@ -5,6 +5,8 @@ import logging
 import os
 import sys
 import traceback
+import docker
+import redis
 from base64 import b64decode
 from functools import wraps
 from typing import TYPE_CHECKING
@@ -1577,3 +1579,44 @@ def get_devbox_docker_volumes_size(devbox_name: str):
 def destroy_devbox(devbox_name: str):
     job = Server().destroy_devbox(devbox_name=devbox_name)
     return {"job": job}
+
+
+@application.post('/bench-start/', defaults={'bench_name': None})
+@application.post("/bench-start/<string:bench_name>")
+def bench_start(bench_name):
+    if not (bench_name or request.headers.get("X-BENCH-NAME", None)):
+        return {"message": "No Bench Provided"}, 400
+
+    message, status = "Request Queued. You can check the status at /bench-status/", 200
+    try:
+        client = docker.from_env()
+        container = client.containers.get(bench_name)
+    except docker.errors.NotFound:
+        message, status = f"No Bench found for the site", 404
+    except docker.errors.APIError as e:
+        message, status = "Internal Service Error", 500
+
+    if container.status in ("running", "restarting"):
+        message = "Bench is already running or restarting"
+
+    redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
+    redis_instance.rpush("bench-start", bench_name)
+
+    return {"message": message}, status
+
+
+@application.get('/bench-status/', defaults={'bench_name': None})
+@application.get("/bench-status/<string:bench_name>")
+def bench_status(bench_name):
+
+    try:
+        client = docker.from_env()
+        container = client.containers.get(bench_name)
+    except docker.errors.NotFound:
+        message, status = "No Bench found for the site", 404
+    except docker.errors.APIError as e:
+        message, status = "Internal Service Error", 500
+
+    # TODO
+
+    return

@@ -8,11 +8,9 @@ upstream {{ bench_name}}-socketio-server {
 }
 
 {% if for_devbox %}
-
 upstream {{ bench_name}}-code-server {
 	server 127.0.0.1:{{ ivend_codeserver_port }} fail_timeout=0;
 }
-
 {% endif %}
 
 map $host $site_name_{{ bench_name_slug }} {
@@ -199,6 +197,16 @@ server {
 	{% if sleepy_containers %}
 	access_log /var/log/nginx/{{ bench_name }}-access.log main;
 	error_log /var/log/nginx/{{ bench_name }}-error.log warn;
+
+	location /bench-start {
+		proxy_set_header X-BENCH-NAME {{ bench_name }};
+		proxy_pass http://127.0.0.1:{{ agent_port }}/bench-start/{{ bench_name }};
+	}
+
+	location /bench-status {
+		proxy_set_header X-BENCH-NAME {{ bench_name }};
+		proxy_pass http://127.0.0.1:{{ agent_port }}/bench-status/{{ bench_name }};
+	}
 	{% endif %}
 
 	location /assets {

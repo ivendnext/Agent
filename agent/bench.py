@@ -187,7 +187,7 @@ class Bench(Base):
             if self.bench_config.get("single_container"):
                 if self.server.allow_sleepy_containers:
                     # just a sanity check for if the container is running
-                    client = docker.from_env(environment=os.environ.copy())
+                    client = docker.from_env()
                     container = client.containers.get(self.name)
                     if container.status != "running":
                         raise Exception(f"The bench container {self.name} - is not running or something else happened")
