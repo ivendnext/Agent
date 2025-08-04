@@ -16,8 +16,10 @@ from random import choices
 from textwrap import indent
 from typing import TYPE_CHECKING, TypedDict
 from shlex import quote
+from filelock import FileLock
 
 import requests
+import docker
 
 from agent.app import App
 from agent.base import AgentException, Base
@@ -176,15 +178,32 @@ class Bench(Base):
         if subdir:
             workdir = os.path.join(workdir, subdir)
 
-        if self.bench_config.get("single_container"):
-            command = f"docker exec -w {workdir} {interactive} {self.name} {command}"
-        else:
-            service = f"{self.name}_worker_default"
-            task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
-                "output"
-            ].split()[0]
-            command = f"docker exec -w {workdir} {interactive} {service}.1.{task} {command}"
-        return self.execute(command, input=input, non_zero_throw=non_zero_throw)
+        # TODO: take a lock - and then check container status (what if we just let it fail?)
+        lock = FileLock(f"/tmp/{self.name}.lock")
+        if self.server.allow_sleepy_containers:
+            lock.acquire()
+
+        try:
+            if self.bench_config.get("single_container"):
+                if self.server.allow_sleepy_containers:
+                    # just a sanity check for if the container is running
+                    client = docker.from_env(environment=os.environ.copy())
+                    container = client.containers.get(self.name)
+                    if container.status != "running":
+                        raise Exception(f"The bench container {self.name} - is not running or something else happened")
+
+                command = f"docker exec -w {workdir} {interactive} {self.name} {command}"
+            else:
+                service = f"{self.name}_worker_default"
+                task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
+                    "output"
+                ].split()[0]
+                command = f"docker exec -w {workdir} {interactive} {service}.1.{task} {command}"
+            return self.execute(command, input=input, non_zero_throw=non_zero_throw)
+
+        finally:
+            if self.server.allow_sleepy_containers:
+                lock.release()
 
     @step("New Site")
     def bench_new_site(self, name, mariadb_root_password, admin_password):
@@ -199,14 +218,6 @@ class Bench(Base):
             )
         finally:
             self.drop_mariadb_user(name, mariadb_root_password, site_database)
-
-    @step("New Site")
-    def bench_new_devbox_site(self, name, mariadb_root_password, admin_password):
-        return self.docker_execute(
-            f"bench new-site "
-            f"--mariadb-root-password {mariadb_root_password} "
-            f"--admin-password {admin_password} {name}"
-        )
 
     @job("Create User", priority="high")
     def create_user(
@@ -350,8 +361,7 @@ class Bench(Base):
         admin_password,
         create_user: dict | None = None,
     ):
-        new_site = self.bench_new_devbox_site if self.for_devbox else self.bench_new_site
-        new_site(name, mariadb_root_password, admin_password)
+        self.bench_new_site(name, mariadb_root_password, admin_password)
         site = Site(name, self)
         site.install_apps(apps)
         site.update_config(config)
@@ -380,9 +390,9 @@ class Bench(Base):
         private,
         skip_failing_patches,
     ):
+        # first create the site - so that we dont needlessly download files if the container is sleeping
+        self.bench_new_site(name, mariadb_root_password, admin_password)
         files = self.download_files(name, database, public, private)
-        new_site = self.bench_new_site if not self.for_devbox else self.bench_new_devbox_site
-        new_site(name, mariadb_root_password, admin_password)
         site = Site(name, self)
         site.update_config(default_config)
         try:

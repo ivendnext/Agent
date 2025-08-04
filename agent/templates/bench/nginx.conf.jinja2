@@ -196,6 +196,11 @@ server {
 	add_header X-Content-Type-Options nosniff;
 	add_header X-XSS-Protection "1; mode=block";
 
+	{% if sleepy_containers %}
+	access_log /var/log/nginx/{{ bench_name }}-access.log main;
+	error_log /var/log/nginx/{{ bench_name }}-error.log warn;
+	{% endif %}
+
 	location /assets {
 		try_files $uri =404;
 		add_header Cache-Control "max-age=31536000, immutable";

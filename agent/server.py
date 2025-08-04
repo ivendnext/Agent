@@ -33,6 +33,7 @@ class Server(Base):
         self.archived_directory = os.path.join(os.path.dirname(self.benches_directory), "archived")
         self.nginx_directory = self.config["nginx_directory"]
         self.hosts_directory = os.path.join(self.nginx_directory, "hosts")
+        self.allow_sleepy_containers = self.config.get("allow_sleepy_containers", False)
 
         self.error_pages_directory = os.path.join(self.directory, "repo", "agent", "pages")
         self.job = None
