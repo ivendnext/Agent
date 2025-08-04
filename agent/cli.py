@@ -61,7 +61,8 @@ def ping_server(password: str):
 @click.option("--proxy-ip", required=False, type=str, default=None)
 @click.option("--sentry-dsn", required=False, type=str)
 @click.option("--is_devbox_proxy", required=False, type=str, default=False)
-def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=None):
+@click.option("--allow-sleepy-containers", is_flag=True)
+def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=None, allow_sleepy_containers=False):
     config = {
         "benches_directory": f"/home/{user}/benches",
         "devboxes_directory": f"/home/{user}/devboxes",
@@ -73,6 +74,7 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=
         "workers": workers,
         "gunicorn_workers": 2,
         "web_port": 25052,
+        "allow_sleepy_containers": allow_sleepy_containers,
     }
     if proxy_ip:
         config["proxy_ip"] = proxy_ip

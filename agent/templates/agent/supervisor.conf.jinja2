@@ -31,5 +31,35 @@ stderr_logfile={{ directory }}/logs/worker.error.log
 user={{ user }}
 directory={{ directory }}
 
+{% if sleepy_containers %}
+[program:bench-starter]
+command=
+environment=PYTHONUNBUFFERED=1
+autostart=true
+autorestart=true
+stopwaitsecs=1500
+killasgroup=true
+numprocs=1
+process_name=%(program_name)s-%(process_num)d
+stdout_logfile={{ directory }}/logs/
+stderr_logfile={{ directory }}/logs/
+user={{ user }}
+directory={{ directory }}
+
+[program:bench-stopper]
+command=
+environment=PYTHONUNBUFFERED=1
+autostart=true
+autorestart=true
+stopwaitsecs=1500
+killasgroup=true
+numprocs=1
+process_name=%(program_name)s-%(process_num)d
+stdout_logfile={{ directory }}/logs/
+stderr_logfile={{ directory }}/logs/
+user={{ user }}
+directory={{ directory }}
+
+{% endif %}
 [group:agent]
-programs=web, redis, worker
+programs=web, redis, worker{% if sleepy_containers %}, bench-starter, bench-stopper{% endif %}
