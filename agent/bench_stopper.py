@@ -158,18 +158,20 @@ class BenchStopper:
         except Exception as e:
             self.log(f"Unexpected error processing container {container.name}: {e}")
 
-    def _save_container_stats(self) -> None:
-        def _load_existing_stats():
-            """Load existing container stats from JSON file."""
-            if os.path.exists(Config.stats_file):
-                with open(Config.stats_file, 'r') as f:
-                    return json.load(f)
-            return {}
+    def _load_existing_stats():
+        """Load existing container stats from JSON file."""
+        if os.path.exists(Config.stats_file):
+            with open(Config.stats_file, 'r') as f:
+                return json.load(f)
+        return {}
 
-        stats = _load_existing_stats()
-        stats.update(self.mem_stats)
-        with open(Config.stats_file, 'w') as f:
-            json.dump(stats, f, indent=2)
+    def _save_container_stats(self) -> None:
+        with FileLock("/tmp/mem_stats.lock"):
+            stats = self._load_existing_stats()
+            stats.update(self.mem_stats)
+
+            with open(Config.stats_file, 'w') as f:
+                json.dump(stats, f, indent=2)
 
         # clear any residue
         self.mem_stats = {}
