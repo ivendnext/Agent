@@ -732,7 +732,7 @@ class Server(Base):
                 "directory": self.directory,
                 "user": self.config["user"],
                 "sentry_dsn": self.config.get("sentry_dsn"),
-                "sleepy_containers": self.config.get("allow_sleepy_containers"),
+                "sleepy_containers": self.allow_sleepy_containers,
             },
             supervisor_config,
         )

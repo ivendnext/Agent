@@ -40,7 +40,6 @@ class BenchStopper:
     def _init_docker_client(self) -> docker.DockerClient:
         try:
             self.docker_client = docker.from_env()
-            # test conn
             self.docker_client.ping()
         except Exception as e:
             self.log(f"Failed to connect to Docker: {e}")
@@ -213,7 +212,7 @@ class BenchStopper:
         self.log("Bench stopper stopped")
 
     def log(self, message):
-        print(f"[{datetime.now()}] {message!s}")
+        print(f"[{datetime.datetime.now()}] {message!s}")
 
 
 if __name__ == "__main__":
