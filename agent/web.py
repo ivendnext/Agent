@@ -35,6 +35,8 @@ from agent.proxysql import ProxySQL
 from agent.security import Security
 from agent.server import Server
 from agent.ssh import SSHProxy
+from agent.bench_starter import Config
+
 
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
@@ -1613,8 +1615,10 @@ def bench_start(bench_name):
         message = "Bench is already running or restarting"
     else:
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
-        if redis_instance.zscore("bench_start_queue", bench_name) is None:
-            redis_instance.zadd("bench_start_queue", {bench_name: int(time.time())})
+        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
+        if bench_name not in queue_items:
+            # Add to the end of the queue (FIFO)
+            redis_instance.rpush(Config.redis_queue_key, bench_name)
         else:
             message = "Request for the bench to start is already queued"
 
@@ -1639,10 +1643,15 @@ def bench_status(bench_name):
     message, status = f"Bench status: {container.status}", 200
     if container.status in ("exited", "stopped"):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
-        # Check if bench is queued to start
-        if redis_instance.zscore("bench_start_queue", bench_name) is not None:
+        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
+        if bench_name in queue_items:
             return {"message": "A job to start the bench is in queue"}, 200
 
-        # TODO: check in failed queue
+        # Check in failed queue
+        failed_key = f"{Config.redis_failed_hash_key}:{bench_name}"
+        if redis_instance.exists(failed_key):
+            failed_info = redis_instance.hgetall(failed_key)
+            if failed_info:
+                message = f"Bench failed to start. Reason: {failed_info['reason']}"
 
     return {"message": message}, status

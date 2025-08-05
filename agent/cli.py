@@ -72,7 +72,7 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=
         "redis_port": 25025,
         "user": user,
         "workers": workers,
-        "gunicorn_workers": 2,
+        "gunicorn_workers": 3,
         "web_port": 25052,
         "allow_sleepy_containers": allow_sleepy_containers,
     }
