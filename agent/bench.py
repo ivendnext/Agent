@@ -510,6 +510,7 @@ class Bench(Base):
             "code_server": codeserver,
             "for_devbox": self.for_devbox,
             "ivend_codeserver_port": self.bench_config["codeserver_port"], #TODO: change this
+            "sleepy_containers": self.server.allow_sleepy_containers,
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
 
@@ -747,6 +748,7 @@ class Bench(Base):
 
     def stop(self):
         if self.bench_config.get("single_container"):
+            # TODO: add locking here
             self.execute(f"docker stop {self.name}")
             return self.execute(f"docker rm {self.name}")
         return self.execute(f"docker stack rm {self.name}")
@@ -761,6 +763,7 @@ class Bench(Base):
 
     @job("Force Update Bench Limits")
     def force_update_limits(self, memory_high, memory_max, memory_swap, vcpu):
+        # TODO: add locking here
         self._stop()
         self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
         self._start()
