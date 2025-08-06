@@ -182,11 +182,15 @@ class Server(Base):
     @step("Remove Unused Docker Artefacts")
     def remove_unused_docker_artefacts(self):
         before = self.execute("docker system df -v")["output"].split("\n")
-        prune = self.execute("docker system prune -af")["output"].split("\n")
+        images = self.execute("docker image prune -af")["output"].split("\n")
+        network = self.execute("docker network prune -f")["output"].split("\n")
+        build = self.execute("docker builder prune -f")["output"].split("\n")
         after = self.execute("docker system df -v")["output"].split("\n")
         return {
             "before": before,
-            "prune": prune,
+            "images": images,
+            "network": network,
+            "build": build,
             "after": after,
         }
 

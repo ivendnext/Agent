@@ -14,7 +14,6 @@ class Config:
     inactive_threshold_hours: int = 3
     min_uptime_hours: int = 3
     access_log_path: str = "/var/log/nginx"
-    lock_timeout_seconds: int = 0
     stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
 
 
@@ -146,7 +145,7 @@ class BenchStopper:
 
             if self._should_stop_container(container):
                 self.log(f"Acquiring lock for {container.name}")
-                with FileLock(f"/tmp/{container.name}.lock", timeout=Config.lock_timeout_seconds):
+                with FileLock(f"/tmp/{container.name}.lock", timeout=0):
                     self.log(f"Lock acquired for {container.name}")
                     container.stop()
                     self.log(f"Stopped inactive container: {container.name}")
