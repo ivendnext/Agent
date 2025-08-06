@@ -1595,8 +1595,8 @@ def destroy_devbox(devbox_name: str):
     return {"job": job}
 
 
-@application.post('/bench-start/', defaults={'bench_name': None})
-@application.post("/bench-start/<string:bench_name>")
+@application.route('/bench-start/', defaults={'bench_name': None})
+@application.route("/bench-start/<string:bench_name>")
 @auth_exempt
 def bench_start(bench_name):
     if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
@@ -1625,8 +1625,8 @@ def bench_start(bench_name):
     return {"message": message}, status
 
 
-@application.get('/bench-status/', defaults={'bench_name': None})
-@application.get("/bench-status/<string:bench_name>")
+@application.route('/bench-status/', defaults={'bench_name': None})
+@application.route("/bench-status/<string:bench_name>")
 @auth_exempt
 def bench_status(bench_name):
     if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):

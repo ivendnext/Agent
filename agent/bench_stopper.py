@@ -104,7 +104,7 @@ class BenchStopper:
             # Check container uptime
             start_time_str = container.attrs["State"]["StartedAt"]
             start_time = datetime.datetime.fromisoformat(
-                start_time_str.rstrip('Z')
+                start_time_str.rstrip('Z')[:26]
             ).replace(tzinfo=datetime.timezone.utc)
 
             now = datetime.datetime.now()
@@ -144,10 +144,12 @@ class BenchStopper:
         try:
             self._update_container_memory_usage(container)
 
-            with FileLock(f"/tmp/{container.name}.lock", timeout=Config.lock_timeout_seconds):
-                if self._should_stop_container(container):
+            if self._should_stop_container(container):
+                self.log(f"Acquiring lock for {container.name}")
+                with FileLock(f"/tmp/{container.name}.lock", timeout=Config.lock_timeout_seconds):
+                    self.log(f"Lock acquired for {container.name}")
                     container.stop()
-                    self.log(f"Stopping inactive container: {container.name}")
+                    self.log(f"Stopped inactive container: {container.name}")
 
         except docker.errors.NotFound:
             self.log(f"Container {container.name} not found when trying to stop")
@@ -158,7 +160,7 @@ class BenchStopper:
         except Exception as e:
             self.log(f"Unexpected error processing container {container.name}: {e}")
 
-    def _load_existing_stats():
+    def _load_existing_stats(self):
         """Load existing container stats from JSON file."""
         if os.path.exists(Config.stats_file):
             with open(Config.stats_file, 'r') as f:
@@ -178,8 +180,6 @@ class BenchStopper:
 
     def start(self) -> None:
         """Start the monitoring service."""
-        self.log("Starting Docker container monitor")
-
         retries = 3
         self.running = True
 
@@ -191,6 +191,7 @@ class BenchStopper:
             try:
                 time.sleep(Config.check_interval_minutes * 60)
 
+                self.log("Starting Docker container monitor")
                 self._init_docker_client()
 
                 running_containers = self.docker_client.containers.list()
@@ -214,7 +215,7 @@ class BenchStopper:
         self.log("Bench stopper stopped")
 
     def log(self, message):
-        print(f"[{datetime.datetime.now()}] {message!s}")
+        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
 
 
 if __name__ == "__main__":

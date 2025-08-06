@@ -511,6 +511,7 @@ class Bench(Base):
             "for_devbox": self.for_devbox,
             "ivend_codeserver_port": self.bench_config["codeserver_port"], #TODO: change this
             "sleepy_containers": self.server.allow_sleepy_containers,
+            "agent_port": self.server.config["web_port"],
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
 
