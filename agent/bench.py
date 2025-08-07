@@ -178,32 +178,22 @@ class Bench(Base):
         if subdir:
             workdir = os.path.join(workdir, subdir)
 
-        # TODO: take a lock - and then check container status (what if we just let it fail?)
-        lock = FileLock(f"/tmp/{self.name}.lock")
-        if self.server.allow_sleepy_containers:
-            lock.acquire()
-
-        try:
-            if self.bench_config.get("single_container"):
-                if self.server.allow_sleepy_containers:
-                    # just a sanity check for if the container is running
-                    client = docker.from_env()
-                    container = client.containers.get(self.name)
-                    if container.status != "running":
-                        raise Exception(f"The bench container {self.name} - is not running or something else happened")
-
-                command = f"docker exec -w {workdir} {interactive} {self.name} {command}"
-            else:
-                service = f"{self.name}_worker_default"
-                task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
-                    "output"
-                ].split()[0]
-                command = f"docker exec -w {workdir} {interactive} {service}.1.{task} {command}"
-            return self.execute(command, input=input, non_zero_throw=non_zero_throw)
-
-        finally:
+        if self.bench_config.get("single_container"):
+            command = f"docker exec -w {workdir} {interactive} {self.name} {command}"
             if self.server.allow_sleepy_containers:
-                lock.release()
+                with FileLock(f"/tmp/{self.name}.lock"):
+                    # just a sanity check for if the container is running
+                    if not self.is_bench_running():
+                        raise Exception(f"The bench container {self.name} - is not running or something else happened")
+                    return self.execute(command, input=input, non_zero_throw=non_zero_throw)
+        else:
+            service = f"{self.name}_worker_default"
+            task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
+                "output"
+            ].split()[0]
+            command = f"docker exec -w {workdir} {interactive} {service}.1.{task} {command}"
+
+        return self.execute(command, input=input, non_zero_throw=non_zero_throw)
 
     @step("New Site")
     def bench_new_site(self, name, mariadb_root_password, admin_password):
@@ -351,6 +341,9 @@ class Bench(Base):
 
         return status
 
+    def is_bench_running(self):
+        return bool(self.execute(f"docker ps --filter name={self.name} --filter status=running --format '{{{{.Names}}}}'")["output"])
+
     @job("New Site", priority="high")
     def new_site(
         self,
@@ -490,9 +483,6 @@ class Bench(Base):
             self._set_sites_host(sites)
 
         codeserver = _get_codeserver_config(self.directory)
-
-        # TODO: add routing rule for /vscode
-
         config = {
             "bench_name": self.name,
             "bench_name_slug": self.name.replace("-", "_"),
@@ -749,7 +739,7 @@ class Bench(Base):
 
     def stop(self):
         if self.bench_config.get("single_container"):
-            # TODO: add locking here
+            # TODO: do we need locking here?
             self.execute(f"docker stop {self.name}")
             return self.execute(f"docker rm {self.name}")
         return self.execute(f"docker stack rm {self.name}")
@@ -764,10 +754,18 @@ class Bench(Base):
 
     @job("Force Update Bench Limits")
     def force_update_limits(self, memory_high, memory_max, memory_swap, vcpu):
-        # TODO: add locking here
-        self._stop()
-        self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
-        self._start()
+        def _update_limits(should_start: bool):
+            self._stop()
+            self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
+            if should_start:
+                self._start()
+
+        # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
+        if self.server.allow_sleepy_containers:
+            with FileLock(f"/tmp/{self.name}.lock"):
+                _update_limits(self.is_bench_running())
+        else:
+           _update_limits(True)
 
     def update_runtime_limits(self):
         memory_high = self.bench_config.get("memory_high")
