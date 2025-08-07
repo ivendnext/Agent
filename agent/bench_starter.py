@@ -37,7 +37,6 @@ class BenchStarter:
         self.redis_client = None
         self.docker_client = None
         self.running = False
-        self.mem_stats = None
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -120,9 +119,6 @@ class BenchStarter:
 
     def _calculate_bench_memory_requirement(self, bench_name: str) -> int:
         # First try to get from memory stats file
-        if not self.mem_stats:
-            self.mem_stats = self._load_memory_stats()
-
         if bench_name in self.mem_stats:
             mem_stat = self.mem_stats[bench_name]
             if mem_stat > 0:
@@ -275,6 +271,7 @@ class BenchStarter:
                 time.sleep(Config.check_interval_seconds)
                 self.log("Starting Bench Container Starter")
 
+                self.mem_stats = self._load_memory_stats()
                 self._init_redis_client()
                 self._init_docker_client()
 
