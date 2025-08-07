@@ -26,10 +26,9 @@ class Config:
     redis_failed_hash_key: str = "bench_start_failed"
     redis_failed_hash_expiry_hours: int = 3
     check_interval_seconds: int = 60
-    memory_reserve_percent: float = 25.0  # Reserve 20-25% of system memory
+    memory_reserve_percent: float = 25.0  # Reserve 25% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
-    benches_base_path: str = "/home/frappe/benches"
-    worker_memory_mb: int = 150  # this is an estimate
+    worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
 
 
@@ -199,12 +198,13 @@ class BenchStarter:
 
         return []
 
-    def _remove_from_queue(self, bench_name: str) -> bool:
+    def _remove_from_queue(self, bench_names: list) -> bool:
         """Remove a bench from the Redis queue after successful start."""
         try:
-            self.redis_client.lrem(Config.redis_queue_key, 1, bench_name)
+            for bench_name in bench_names:
+                self.redis_client.lrem(Config.redis_queue_key, 1, bench_name)
         except Exception as e:
-            self.log(f"Error removing {bench_name} from queue: {e}")
+            self.log(f"Error removing benches from start queue: {e}")
 
     def _add_to_failed_queue(self, bench_name: str, reason: str) -> bool:
         """Add a bench to the failed queue with expiry."""
@@ -235,7 +235,7 @@ class BenchStarter:
 
             # Get pending benches from main queue
             pending_benches = self._get_pending_benches()
-            for bench_name in pending_benches:
+            for i, bench_name in enumerate(pending_benches):
                 if not self.running:
                     break
 
@@ -254,13 +254,13 @@ class BenchStarter:
                             bench_name,
                             "Failed to start container. Please try to queue again or contact support."
                         )
-                    self._remove_from_queue(bench_name)
+                    self._remove_from_queue([bench_name])
                 else:
                     # Memory constraint - move to failed queue and stop processing
-                    self._remove_from_queue(bench_name)
-                    self._add_to_failed_queue(bench_name, reason)
-                    self.log(f"Cannot start {bench_name}: {reason}")
-                    break  # Stop processing if we can't fit any more due to memory
+                    self._remove_from_queue(pending_benches[i:])
+                    [self._add_to_failed_queue(b, reason) for b in pending_benches[i:]]
+                    self.log(f"Cannot start {pending_benches[i:]}: {reason}")
+                    break
 
         except Exception as e:
             self.log(f"Error processing batch: {e}")

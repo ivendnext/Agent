@@ -173,6 +173,7 @@ class BenchStopper:
 
             with open(Config.stats_file, 'w') as f:
                 json.dump(stats, f, indent=2)
+                f.flush()
 
         # clear any residue
         self.mem_stats = {}
