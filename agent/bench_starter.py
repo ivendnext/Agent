@@ -254,12 +254,13 @@ class BenchStarter:
                     if self._start_container(bench_name):
                         # reduce the available memory
                         available_memory = available_memory - required_memory_by_bench
-                        # Remove from queue on successful start
-                        self._remove_from_queue(bench_name)
                     else:
                         # Container start failed - move to failed queue
-                        self._remove_from_queue(bench_name)
-                        self._add_to_failed_queue(bench_name, "Failed to start container")
+                        self._add_to_failed_queue(
+                            bench_name,
+                            "Failed to start container. Please try to queue again or contact support."
+                        )
+                    self._remove_from_queue(bench_name)
                 else:
                     # Memory constraint - move to failed queue and stop processing
                     self._remove_from_queue(bench_name)
