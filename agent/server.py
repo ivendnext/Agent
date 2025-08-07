@@ -184,7 +184,7 @@ class Server(Base):
         before = self.execute("docker system df -v")["output"].split("\n")
         images = self.execute("docker image prune -af")["output"].split("\n")
         network = self.execute("docker network prune -f")["output"].split("\n")
-        build = self.execute("docker builder prune -f")["output"].split("\n")
+        build = self.execute("docker buildx prune -f")["output"].split("\n")
         after = self.execute("docker system df -v")["output"].split("\n")
         return {
             "before": before,
