@@ -70,8 +70,8 @@ class BenchStopper:
 
         # Look for log files that might be associated with this bench
         for pattern in [
-            f"{bench_name}*.log",
-            f"{bench_name.replace('-', '_')}*.log",
+            f"{bench_name}-access.log",
+            f"{bench_name.replace('-', '_')}-access.log",
         ]:
             found_files = list(access_log_dir.glob(pattern))
             log_files.extend(found_files)
@@ -190,7 +190,7 @@ class BenchStopper:
             try:
                 time.sleep(Config.check_interval_minutes * 60)
 
-                self.log("Starting Docker container monitor")
+                self.log("Starting Bench Stopper")
                 self._init_docker_client()
 
                 running_containers = self.docker_client.containers.list()

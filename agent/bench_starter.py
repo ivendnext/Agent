@@ -120,8 +120,6 @@ class BenchStarter:
         return {}
 
     def _calculate_bench_memory_requirement(self, bench_name: str) -> int:
-        """Calculate memory requirement for a bench in bytes."""
-
         # First try to get from memory stats file
         if not self.mem_stats:
             self.mem_stats = self._load_memory_stats()
@@ -237,15 +235,11 @@ class BenchStarter:
 
             # Get pending benches from main queue
             pending_benches = self._get_pending_benches()
-            if not pending_benches:
-                return
-
-            self.log(f"Processing {len(pending_benches)} benches from queue")
-
             for bench_name in pending_benches:
                 if not self.running:
                     break
 
+                self.log(f"Processing {bench_name}")
                 required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
 
                 # Check if we can start this bench
@@ -273,14 +267,13 @@ class BenchStarter:
 
     def start(self) -> None:
         """Start the bench starter service."""
-        self.log("Starting Bench Container Starter")
-
         retries = 3
         self.running = True
 
         while self.running:
             try:
                 time.sleep(Config.check_interval_seconds)
+                self.log("Starting Bench Container Starter")
 
                 self._init_redis_client()
                 self._init_docker_client()
