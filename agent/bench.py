@@ -183,7 +183,7 @@ class Bench(Base):
             if self.server.allow_sleepy_containers:
                 with FileLock(f"/tmp/{self.name}.lock"):
                     # just a sanity check for if the container is running
-                    if not self.is_bench_running():
+                    if not self.server.is_container_running(self.name):
                         raise Exception(f"The bench container {self.name} - is not running or something else happened")
                     return self.execute(command, input=input, non_zero_throw=non_zero_throw)
         else:
@@ -340,9 +340,6 @@ class Bench(Base):
             status["sites"][site]["web"] = False
 
         return status
-
-    def is_bench_running(self):
-        return bool(self.execute(f"docker ps --filter name={self.name} --filter status=running --format '{{{{.Names}}}}'")["output"])
 
     @job("New Site", priority="high")
     def new_site(
@@ -768,7 +765,7 @@ class Bench(Base):
         # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
         if self.server.allow_sleepy_containers:
             with FileLock(f"/tmp/{self.name}.lock"):
-                _update_limits(self.is_bench_running())
+                _update_limits(self.server.is_container_running(self.name))
         else:
            _update_limits(True)
 

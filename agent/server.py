@@ -45,6 +45,9 @@ class Server(Base):
         password = registry["password"]
         return self.execute(f"docker login -u {username} -p {password} {url}")
 
+    def is_container_running(self, name):
+        return bool(self.execute(f"docker ps --filter name={name} --filter status=running --format '{{{{.Names}}}}'")["output"])
+
     @step("Initialize Bench")
     def bench_init(self, name, config):
         bench_directory = os.path.join(self.benches_directory, name)

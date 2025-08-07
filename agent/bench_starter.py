@@ -195,12 +195,12 @@ class BenchStarter:
         return []
 
     def _remove_from_queue(self, bench_names: list) -> bool:
-        """Remove a bench from the Redis queue after successful start."""
-        try:
-            for bench_name in bench_names:
+        """Remove benches from the Redis queue after successful start."""
+        for bench_name in bench_names:
+            try:
                 self.redis_client.lrem(Config.redis_queue_key, 1, bench_name)
-        except Exception as e:
-            self.log(f"Error removing benches from start queue: {e}")
+            except Exception as e:
+                self.log(f"Error removing {bench_name} from start queue: {e}")
 
     def _add_to_failed_queue(self, bench_name: str, reason: str) -> bool:
         """Add a bench to the failed queue with expiry."""

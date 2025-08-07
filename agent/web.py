@@ -89,8 +89,8 @@ log = logging.getLogger("werkzeug")
 log.handlers = []
 
 
-def auth_exempt(func):
-    func._auth_exempt = True
+def skip_auth(func):
+    func._skip_auth = True
     return func
 
 
@@ -102,7 +102,7 @@ def validate_access_token():
 
         # Skip validation for endpoints marked with @auth_exempt
         view_func = application.view_functions.get(request.endpoint)
-        if view_func and getattr(view_func, "_auth_exempt", False):
+        if view_func and getattr(view_func, "_skip_auth", False):
             return None
 
         method, access_token = request.headers["Authorization"].split(" ")
@@ -1597,7 +1597,7 @@ def destroy_devbox(devbox_name: str):
 
 @application.route('/bench-start/', defaults={'bench_name': None})
 @application.route("/bench-start/<string:bench_name>")
-@auth_exempt
+@skip_auth
 def bench_start(bench_name):
     if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
         return {"message": "No Bench Provided"}, 400
@@ -1627,7 +1627,7 @@ def bench_start(bench_name):
 
 @application.route('/bench-status/', defaults={'bench_name': None})
 @application.route("/bench-status/<string:bench_name>")
-@auth_exempt
+@skip_auth
 def bench_status(bench_name):
     if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
         return {"message": "No Bench Provided"}, 400
