@@ -246,7 +246,7 @@ class BenchStarter:
                 if not self.running:
                     break
 
-                required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name, )
+                required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
 
                 # Check if we can start this bench
                 can_start, reason = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)

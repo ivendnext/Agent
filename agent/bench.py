@@ -738,10 +738,15 @@ class Bench(Base):
         return self.execute(command)
 
     def stop(self):
-        if self.bench_config.get("single_container"):
-            # TODO: do we need locking here?
+        def _stop_and_remove_single():
             self.execute(f"docker stop {self.name}")
             return self.execute(f"docker rm {self.name}")
+
+        if self.bench_config.get("single_container"):
+            if self.server.allow_sleepy_containers:
+                with FileLock(f"/tmp/{self.name}.lock"):
+                    return _stop_and_remove_single()
+            return _stop_and_remove_single()
         return self.execute(f"docker stack rm {self.name}")
 
     @step("Stop Bench")
