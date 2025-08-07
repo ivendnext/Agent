@@ -33,6 +33,7 @@ class Server(Base):
         self.archived_directory = os.path.join(os.path.dirname(self.benches_directory), "archived")
         self.nginx_directory = self.config["nginx_directory"]
         self.hosts_directory = os.path.join(self.nginx_directory, "hosts")
+        self.allow_sleepy_containers = bool(self.config.get("allow_sleepy_containers", False))
 
         self.error_pages_directory = os.path.join(self.directory, "repo", "agent", "pages")
         self.job = None
@@ -43,6 +44,9 @@ class Server(Base):
         username = registry["username"]
         password = registry["password"]
         return self.execute(f"docker login -u {username} -p {password} {url}")
+
+    def is_container_running(self, name):
+        return bool(self.execute(f"docker ps --filter name={name} --filter status=running --format '{{{{.Names}}}}'")["output"])
 
     @step("Initialize Bench")
     def bench_init(self, name, config):
@@ -181,11 +185,15 @@ class Server(Base):
     @step("Remove Unused Docker Artefacts")
     def remove_unused_docker_artefacts(self):
         before = self.execute("docker system df -v")["output"].split("\n")
-        prune = self.execute("docker system prune -af")["output"].split("\n")
+        images = self.execute("docker image prune -af")["output"].split("\n")
+        network = self.execute("docker network prune -f")["output"].split("\n")
+        build = self.execute("docker buildx prune -f")["output"].split("\n")
         after = self.execute("docker system df -v")["output"].split("\n")
         return {
             "before": before,
-            "prune": prune,
+            "images": images,
+            "network": network,
+            "build": build,
             "after": after,
         }
 
@@ -731,6 +739,7 @@ class Server(Base):
                 "directory": self.directory,
                 "user": self.config["user"],
                 "sentry_dsn": self.config.get("sentry_dsn"),
+                "sleepy_containers": self.allow_sleepy_containers,
             },
             supervisor_config,
         )
