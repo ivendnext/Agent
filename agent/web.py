@@ -100,7 +100,7 @@ def validate_access_token():
         if application.debug:
             return None
 
-        # Skip validation for endpoints marked with @auth_exempt
+        # Skip validation for endpoints marked with @skip_auth
         view_func = application.view_functions.get(request.endpoint)
         if view_func and getattr(view_func, "_skip_auth", False):
             return None
@@ -1600,19 +1600,19 @@ def destroy_devbox(devbox_name: str):
 @skip_auth
 def bench_start(bench_name):
     if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
-        return {"message": "No Bench Provided"}, 400
+        return {"message": "No Bench Provided."}, 400
 
     try:
         client = docker.from_env()
         container = client.containers.get(bench_name)
     except docker.errors.NotFound:
-        return {"message": "No Bench found for the site"}, 404
+        return {"message": "No Bench found for the site."}, 404
     except docker.errors.APIError as e:
-        return {"message": "Internal Service Error"}, 500
+        return {"message": "Internal Service Error."}, 500
 
-    message, status = "Request Queued. You can check the status at /bench-status/", 200
+    message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 200
     if container.status in ("running", "restarting"):
-        message = "Bench is already running or restarting"
+        message = "Bench is already running or restarting."
     else:
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
         queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
@@ -1620,7 +1620,7 @@ def bench_start(bench_name):
             # Add to the end of the queue (FIFO)
             redis_instance.rpush(Config.redis_queue_key, bench_name)
         else:
-            message = "Request for the bench to start is already queued"
+            message = "Request for the bench to start is already enqueued."
 
     return {"message": message}, status
 
@@ -1630,28 +1630,26 @@ def bench_start(bench_name):
 @skip_auth
 def bench_status(bench_name):
     if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
-        return {"message": "No Bench Provided"}, 400
+        return {"message": "No Bench Provided."}, 400
 
     try:
         client = docker.from_env()
         container = client.containers.get(bench_name)
     except docker.errors.NotFound:
-        return {"message": "No Bench found for the site"}, 404
+        return {"message": "No Bench found for the site."}, 404
     except docker.errors.APIError as e:
         return {"message": "Internal Service Error"}, 500
 
-    message, status = f"Bench status: {container.status}", 200
+    message, status = f"Bench status: {container.status}.", 200
     if container.status in ("exited", "stopped"):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
         queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
         if bench_name in queue_items:
-            return {"message": "A job to start the bench is in queue"}, 200
+            return {"message": "Request for the bench to start is already enqueued."}, 200
 
-        # Check in failed queue
-        failed_key = f"{Config.redis_failed_hash_key}:{bench_name}"
-        if redis_instance.exists(failed_key):
-            failed_info = redis_instance.hgetall(failed_key)
-            if failed_info:
-                message = f"Bench failed to start. Reason: {failed_info['reason']}"
+        # Check in failed hash
+        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "reason")
+        if failed_info:
+            message = f"Bench failed to start. Reason: {failed_info}."
 
     return {"message": message}, status

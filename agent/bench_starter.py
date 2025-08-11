@@ -24,7 +24,7 @@ class Config:
     redis_port: int = Server().config["redis_port"]
     redis_queue_key: str = "bench_start_queue"
     redis_failed_hash_key: str = "bench_start_failed"
-    redis_failed_hash_expiry_hours: int = 3
+    redis_failed_hash_expiry_mins: int = 15
     check_interval_seconds: int = 60
     memory_reserve_percent: float = 25.0  # Reserve 25% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
@@ -149,6 +149,7 @@ class BenchStarter:
 
     def _can_start_bench(self, available_memory: int, min_available_threshold: int, required_memory_by_bench: int):
         """Check if there's enough memory to start a bench."""
+        # TODO: we could add a slack - like say if it's upto 100mb above then let the bench start (?)
 
         # Check if current available memory is already below threshold
         if available_memory < min_available_threshold:
@@ -213,7 +214,7 @@ class BenchStarter:
             self.redis_client.hset(failed_key, mapping=failed_entry)
 
             # set expiry
-            expiry_seconds = Config.redis_failed_hash_expiry_hours * 3600
+            expiry_seconds = Config.redis_failed_hash_expiry_mins * 60
             self.redis_client.expire(failed_key, expiry_seconds)
             return True
         except Exception as e:
