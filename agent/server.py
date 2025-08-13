@@ -693,6 +693,7 @@ class Server(Base):
                 "tls_protocols": self.config.get("tls_protocols"),
                 "nginx_vts_module_enabled": self.config.get("nginx_vts_module_enabled", True),
                 "ip_whitelist": self.config.get("ip_whitelist", []),
+                "allow_sleepy_containers": self.allow_sleepy_containers,
             },
             nginx_config,
         )
@@ -715,6 +716,7 @@ class Server(Base):
                 "pages_directory": os.path.join(self.directory, "repo", "agent", "pages"),
                 "tls_protocols": self.config.get("tls_protocols"),
                 "press_url": self.config.get("press_url"),
+                "allow_sleepy_containers": self.allow_sleepy_containers,
             },
             agent_nginx_config,
         )
