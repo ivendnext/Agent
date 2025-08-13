@@ -19,7 +19,6 @@ from shlex import quote
 from filelock import FileLock
 
 import requests
-import docker
 
 from agent.app import App
 from agent.base import AgentException, Base
