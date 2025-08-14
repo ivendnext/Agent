@@ -4,7 +4,10 @@ import json
 import logging
 import os
 import sys
+import time
 import traceback
+import docker
+import redis
 from base64 import b64decode
 from functools import wraps
 from typing import TYPE_CHECKING
@@ -32,6 +35,8 @@ from agent.proxysql import ProxySQL
 from agent.security import Security
 from agent.server import Server
 from agent.ssh import SSHProxy
+from agent.bench_starter import Config
+
 
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
@@ -84,11 +89,22 @@ log = logging.getLogger("werkzeug")
 log.handlers = []
 
 
+def skip_auth(func):
+    func._skip_auth = True
+    return func
+
+
 @application.before_request
 def validate_access_token():
     try:
         if application.debug:
             return None
+
+        # Skip validation for endpoints marked with @skip_auth
+        view_func = application.view_functions.get(request.endpoint)
+        if view_func and getattr(view_func, "_skip_auth", False):
+            return None
+
         method, access_token = request.headers["Authorization"].split(" ")
         stored_hash = Server().config["access_token"]
         if method.lower() == "bearer" and pbkdf2.verify(access_token, stored_hash):
@@ -1578,3 +1594,63 @@ def get_devbox_docker_volumes_size(devbox_name: str):
 def destroy_devbox(devbox_name: str):
     job = Server().destroy_devbox(devbox_name=devbox_name)
     return {"job": job}
+
+
+@application.route('/bench-start/', defaults={'bench_name': None})
+@application.route("/bench-start/<string:bench_name>")
+@skip_auth
+def bench_start(bench_name):
+    if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
+        return {"message": "No Bench Provided."}, 400
+
+    try:
+        client = docker.from_env()
+        container = client.containers.get(bench_name)
+    except docker.errors.NotFound:
+        return {"message": "No Bench found for the site."}, 404
+    except docker.errors.APIError as e:
+        return {"message": "Internal Service Error."}, 500
+
+    message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 200
+    if container.status in ("running", "restarting"):
+        message = "Bench is already running or restarting."
+    else:
+        redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
+        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
+        if bench_name not in queue_items:
+            # Add to the end of the queue (FIFO)
+            redis_instance.rpush(Config.redis_queue_key, bench_name)
+        else:
+            message = "Request for the bench to start is already enqueued."
+
+    return {"message": message}, status
+
+
+@application.route('/bench-status/', defaults={'bench_name': None})
+@application.route("/bench-status/<string:bench_name>")
+@skip_auth
+def bench_status(bench_name):
+    if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
+        return {"message": "No Bench Provided."}, 400
+
+    try:
+        client = docker.from_env()
+        container = client.containers.get(bench_name)
+    except docker.errors.NotFound:
+        return {"message": "No Bench found for the site."}, 404
+    except docker.errors.APIError as e:
+        return {"message": "Internal Service Error"}, 500
+
+    message, status = f"Bench status: {container.status}.", 200
+    if container.status in ("exited", "stopped"):
+        redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
+        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
+        if bench_name in queue_items:
+            return {"message": "Request for the bench to start is already enqueued."}, 200
+
+        # Check in failed hash
+        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "reason")
+        if failed_info:
+            message = f"Bench failed to start. Reason: {failed_info}."
+
+    return {"message": message}, status

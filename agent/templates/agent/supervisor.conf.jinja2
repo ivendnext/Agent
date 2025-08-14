@@ -31,5 +31,29 @@ stderr_logfile={{ directory }}/logs/worker.error.log
 user={{ user }}
 directory={{ directory }}
 
+{% if allow_sleepy_containers %}
+[program:bench-starter]
+command=bash -c "{{ directory }}/repo/wait-for-it.sh redis://127.0.0.1:{{ redis_port }} && exec {{directory}}/env/bin/python {{ directory }}/repo/agent/bench_starter.py"
+environment=PYTHONUNBUFFERED=1
+autostart=true
+autorestart=true
+stopwaitsecs=15
+stdout_logfile={{ directory }}/logs/bench_starter.log
+stderr_logfile={{ directory }}/logs/bench_starter.error.log
+user={{ user }}
+directory={{ directory }}
+
+[program:bench-stopper]
+command=bash -c "{{ directory }}/repo/wait-for-it.sh redis://127.0.0.1:{{ redis_port }} && exec {{directory}}/env/bin/python {{ directory }}/repo/agent/bench_stopper.py"
+environment=PYTHONUNBUFFERED=1
+autostart=true
+autorestart=true
+stopwaitsecs=15
+stdout_logfile={{ directory }}/logs/bench_stopper.log
+stderr_logfile={{ directory }}/logs/bench_stopper.error.log
+user={{ user }}
+directory={{ directory }}
+
+{% endif %}
 [group:agent]
-programs=web, redis, worker
+programs=web, redis, worker{% if sleepy_containers %}, bench-starter, bench-stopper{% endif %}

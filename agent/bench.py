@@ -16,6 +16,7 @@ from random import choices
 from textwrap import indent
 from typing import TYPE_CHECKING, TypedDict
 from shlex import quote
+from filelock import FileLock
 
 import requests
 
@@ -178,12 +179,19 @@ class Bench(Base):
 
         if self.bench_config.get("single_container"):
             command = f"docker exec -w {workdir} {interactive} {self.name} {command}"
+            if self.server.allow_sleepy_containers:
+                with FileLock(f"/tmp/{self.name}.lock"):
+                    # just a sanity check for if the container is running
+                    if not self.server.is_container_running(self.name):
+                        raise Exception(f"The bench container {self.name} - is not running or something else happened")
+                    return self.execute(command, input=input, non_zero_throw=non_zero_throw)
         else:
             service = f"{self.name}_worker_default"
             task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
                 "output"
             ].split()[0]
             command = f"docker exec -w {workdir} {interactive} {service}.1.{task} {command}"
+
         return self.execute(command, input=input, non_zero_throw=non_zero_throw)
 
     @step("New Site")
@@ -199,14 +207,6 @@ class Bench(Base):
             )
         finally:
             self.drop_mariadb_user(name, mariadb_root_password, site_database)
-
-    @step("New Site")
-    def bench_new_devbox_site(self, name, mariadb_root_password, admin_password):
-        return self.docker_execute(
-            f"bench new-site "
-            f"--mariadb-root-password {mariadb_root_password} "
-            f"--admin-password {admin_password} {name}"
-        )
 
     @job("Create User", priority="high")
     def create_user(
@@ -354,8 +354,7 @@ class Bench(Base):
         admin_password,
         create_user: dict | None = None,
     ):
-        new_site = self.bench_new_devbox_site if self.for_devbox else self.bench_new_site
-        new_site(name, mariadb_root_password, admin_password)
+        self.bench_new_site(name, mariadb_root_password, admin_password)
         site = Site(name, self)
         site.install_apps(apps)
         site.update_config(config)
@@ -384,9 +383,9 @@ class Bench(Base):
         private,
         skip_failing_patches,
     ):
+        # first create the site - so that we dont needlessly download files if the container is sleeping
+        self.bench_new_site(name, mariadb_root_password, admin_password)
         files = self.download_files(name, database, public, private)
-        new_site = self.bench_new_site if not self.for_devbox else self.bench_new_devbox_site
-        new_site(name, mariadb_root_password, admin_password)
         site = Site(name, self)
         site.update_config(default_config)
         try:
@@ -484,9 +483,6 @@ class Bench(Base):
             self._set_sites_host(sites)
 
         codeserver = _get_codeserver_config(self.directory)
-
-        # TODO: add routing rule for /vscode
-
         config = {
             "bench_name": self.name,
             "bench_name_slug": self.name.replace("-", "_"),
@@ -504,6 +500,8 @@ class Bench(Base):
             "code_server": codeserver,
             "for_devbox": self.for_devbox,
             "ivend_codeserver_port": self.bench_config["codeserver_port"], #TODO: change this
+            "sleepy_containers": self.server.allow_sleepy_containers,
+            "agent_port": self.server.config["web_port"],
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
 
@@ -740,9 +738,15 @@ class Bench(Base):
         return self.execute(command)
 
     def stop(self):
-        if self.bench_config.get("single_container"):
+        def _stop_and_remove_single():
             self.execute(f"docker stop {self.name}")
             return self.execute(f"docker rm {self.name}")
+
+        if self.bench_config.get("single_container"):
+            if self.server.allow_sleepy_containers:
+                with FileLock(f"/tmp/{self.name}.lock"):
+                    return _stop_and_remove_single()
+            return _stop_and_remove_single()
         return self.execute(f"docker stack rm {self.name}")
 
     @step("Stop Bench")
@@ -755,9 +759,18 @@ class Bench(Base):
 
     @job("Force Update Bench Limits")
     def force_update_limits(self, memory_high, memory_max, memory_swap, vcpu):
-        self._stop()
-        self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
-        self._start()
+        def _update_limits(should_start: bool):
+            self._stop()
+            self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
+            if should_start:
+                self._start()
+
+        # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
+        if self.server.allow_sleepy_containers:
+            with FileLock(f"/tmp/{self.name}.lock"):
+                _update_limits(self.server.is_container_running(self.name))
+        else:
+           _update_limits(True)
 
     def update_runtime_limits(self):
         memory_high = self.bench_config.get("memory_high")
