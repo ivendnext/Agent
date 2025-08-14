@@ -31,7 +31,7 @@ stderr_logfile={{ directory }}/logs/worker.error.log
 user={{ user }}
 directory={{ directory }}
 
-{% if sleepy_containers %}
+{% if allow_sleepy_containers %}
 [program:bench-starter]
 command=bash -c "{{ directory }}/repo/wait-for-it.sh redis://127.0.0.1:{{ redis_port }} && exec {{directory}}/env/bin/python {{ directory }}/repo/agent/bench_starter.py"
 environment=PYTHONUNBUFFERED=1

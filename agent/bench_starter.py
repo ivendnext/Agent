@@ -56,7 +56,6 @@ class BenchStarter:
                 port=Config.redis_port,
                 decode_responses=True
             )
-            self.redis_client.ping()
         except Exception as e:
             self.log(f"Failed to connect to Redis: {e}")
             raise
@@ -65,7 +64,6 @@ class BenchStarter:
         """Get or create Docker client with error handling."""
         try:
             self.docker_client = docker.from_env()
-            self.docker_client.ping()
         except Exception as e:
             self.log(f"Failed to connect to Docker: {e}")
             raise
@@ -114,15 +112,14 @@ class BenchStarter:
             return Bench(bench_name, Server()).bench_config
         except Exception as e:
             self.log(f"Could not load config for bench {bench_name}: {e}")
-
         return {}
 
     def _calculate_bench_memory_requirement(self, bench_name: str) -> int:
         # First try to get from memory stats file
-        if bench_name in self.mem_stats:
-            mem_stat = self.mem_stats[bench_name]
+        if bench_name in self.container_mem_stats:
+            mem_stat = self.container_mem_stats[bench_name]
             if mem_stat > 0:
-                self.log(f"Using historical max memory for {bench_name}: {mem_stat}MB")
+                self.log(f"Using historical memory for {bench_name}: {mem_stat}MB")
                 return mem_stat * 1024 * 1024
 
         # use bench config to figure out the memory - this is an estimate at best
@@ -143,13 +140,11 @@ class BenchStarter:
             total_bg_workers = 3 * background_workers
 
         total_workers = gunicorn_workers + total_bg_workers
-        calculated_memory = total_workers * Config.worker_memory_mb * 1024 * 1024
-
-        return calculated_memory
+        return Config.worker_memory_mb * total_workers * 1024 * 1024
 
     def _can_start_bench(self, available_memory: int, min_available_threshold: int, required_memory_by_bench: int):
         """Check if there's enough memory to start a bench."""
-        # TODO: we could add a slack - like say if it's upto 100mb above then let the bench start (?)
+        # TODO: we could add a slack - like say if it's upto 100mb/3% above then let the bench start (?)
 
         # Check if current available memory is already below threshold
         if available_memory < min_available_threshold:
@@ -195,13 +190,12 @@ class BenchStarter:
 
         return []
 
-    def _remove_from_queue(self, bench_names: list) -> bool:
-        """Remove benches from the Redis queue after successful start."""
-        for bench_name in bench_names:
-            try:
-                self.redis_client.lrem(Config.redis_queue_key, 1, bench_name)
-            except Exception as e:
-                self.log(f"Error removing {bench_name} from start queue: {e}")
+    def _remove_from_queue(self, bench_name: list) -> bool:
+        """Remove bench from the Redis queue after successful start."""
+        try:
+            self.redis_client.lrem(Config.redis_queue_key, 1, bench_name)
+        except Exception as e:
+            self.log(f"Error removing {bench_name} from start queue: {e}")
 
     def _add_to_failed_queue(self, bench_name: str, reason: str) -> bool:
         """Add a bench to the failed queue with expiry."""
@@ -223,44 +217,34 @@ class BenchStarter:
         return False
 
     def _process_batch(self) -> None:
-        """Process a batch of bench start requests."""
-        try:
-            # Get current memory state
-            memory_info = self._get_system_memory_info()
-            min_available_threshold = self._get_memory_threshold_bytes(memory_info)
-            available_memory = memory_info["available_effective_bytes"]
+        # Get current memory state
+        memory_info = self._get_system_memory_info()
+        min_available_threshold = self._get_memory_threshold_bytes(memory_info)
+        available_memory = memory_info["available_effective_bytes"]
 
-            # Get pending benches from main queue
-            pending_benches = self._get_pending_benches()
-            for i, bench_name in enumerate(pending_benches):
-                if not self.running:
-                    break
+        # Get pending benches from main queue
+        pending_benches = self._get_pending_benches()
+        for i, bench_name in enumerate(pending_benches):
+            if not self.running:
+                break
 
-                self.log(f"Processing {bench_name}")
-                required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
+            self.log(f"Processing {bench_name}")
+            required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
 
-                # Check if we can start this bench
-                can_start, reason = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)
-                if can_start:
-                    if self._start_container(bench_name):
-                        # reduce the available memory
-                        available_memory = available_memory - required_memory_by_bench
-                    else:
-                        # Container start failed - move to failed queue
-                        self._add_to_failed_queue(
-                            bench_name,
-                            "Failed to start container. Please try to queue again or contact support."
-                        )
-                    self._remove_from_queue([bench_name])
-                else:
-                    # Memory constraint - move to failed queue and stop processing
-                    self._remove_from_queue(pending_benches[i:])
-                    [self._add_to_failed_queue(b, reason) for b in pending_benches[i:]]
-                    self.log(f"Cannot start {pending_benches[i:]}: {reason}")
-                    break
+            # Check if we can start this bench
+            can_start, reason = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)
+            if can_start:
+                if self._start_container(bench_name):
+                    # reduce the available memory
+                    available_memory = available_memory - required_memory_by_bench
+                    self._remove_from_queue(bench_name)
+                    continue
 
-        except Exception as e:
-            self.log(f"Error processing batch: {e}")
+                reason = "Failed to start container. Please try to queue again and/or contact support."
+
+            self._remove_from_queue(bench_name)
+            self._add_to_failed_queue(bench_name, reason)
+            self.log(f"Cannot start {bench_name}: {reason}")
 
     def start(self) -> None:
         """Start the bench starter service."""
@@ -272,7 +256,7 @@ class BenchStarter:
                 time.sleep(Config.check_interval_seconds)
                 self.log("Starting Bench Container Starter")
 
-                self.mem_stats = self._load_memory_stats()
+                self.container_mem_stats = self._load_memory_stats()
                 self._init_redis_client()
                 self._init_docker_client()
 
@@ -290,7 +274,7 @@ class BenchStarter:
         self.log("Bench Starter stopped")
 
     def log(self, message):
-        print(f"[{datetime.datetime.now()}] {message!s}")
+        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
 
 
 if __name__ == "__main__":

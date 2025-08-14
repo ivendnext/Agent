@@ -39,7 +39,6 @@ class BenchStopper:
     def _init_docker_client(self) -> docker.DockerClient:
         try:
             self.docker_client = docker.from_env()
-            self.docker_client.ping()
         except Exception as e:
             self.log(f"Failed to connect to Docker: {e}")
             raise
@@ -144,9 +143,7 @@ class BenchStopper:
             self._update_container_memory_usage(container)
 
             if self._should_stop_container(container):
-                self.log(f"Acquiring lock for {container.name}")
                 with FileLock(f"/tmp/{container.name}.lock", timeout=0):
-                    self.log(f"Lock acquired for {container.name}")
                     container.stop()
                     self.log(f"Stopped inactive container: {container.name}")
 
@@ -167,10 +164,10 @@ class BenchStopper:
         return {}
 
     def _save_container_stats(self) -> None:
-        with FileLock("/tmp/mem_stats.lock"):
-            stats = self._load_existing_stats()
-            stats.update(self.mem_stats)
+        stats = self._load_existing_stats()
+        stats.update(self.mem_stats)
 
+        with FileLock("/tmp/mem_stats.lock"):
             with open(Config.stats_file, 'w') as f:
                 json.dump(stats, f, indent=2)
                 f.flush()
