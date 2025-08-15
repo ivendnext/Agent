@@ -1646,7 +1646,7 @@ def bench_status(bench_name):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
         queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
         if bench_name in queue_items:
-            return {"message": "Request for the bench to start is already enqueued."}, 200
+            return {"message": "Request for the bench to start is enqueued."}, 200
 
         # Check in failed hash
         failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "reason")

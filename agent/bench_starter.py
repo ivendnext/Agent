@@ -148,12 +148,12 @@ class BenchStarter:
 
         # Check if current available memory is already below threshold
         if available_memory < min_available_threshold:
-            return False, "Available memory below minimum threshold."
+            return False, "Available memory below minimum threshold"
 
         # Check if starting this bench would drop available memory below threshold
         projected_available = available_memory - required_memory_by_bench
         if projected_available < min_available_threshold:
-            return False, "Starting bench would drop available memory below threshold."
+            return False, "Starting bench would drop available memory below threshold"
 
         return True, ""
 
