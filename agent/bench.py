@@ -48,6 +48,7 @@ class Bench(Base):
         self.server = server
         self.directory = os.path.join(self.server.benches_directory, name)
         self.sites_directory = os.path.join(self.directory, "sites")
+        self.apps_directory = os.path.join(self.directory, "apps")
         self.config_directory = os.path.join(self.directory, "config")
         self.logs_directory = os.path.join(self.directory, "logs")
         self.apps_file = os.path.join(self.directory, "sites", "apps.txt")
@@ -713,18 +714,23 @@ class Bench(Base):
             ssh_port = self.bench_config.get("ssh_port", self.bench_config["web_port"] + 4000)
             ssh_ip = self.bench_config.get("private_ip", "127.0.0.1")
 
+            restart_policy = "unless-stopped" if self.server.allow_sleepy_containers else "always"
+
             bench_directory = "/home/frappe/frappe-bench"
             mounts = self.prepare_mounts_on_host(bench_directory)
+            if self.for_devbox:
+                # to ensure app changes dont just vanish
+                mounts += f"-v {self.apps_directory}:{bench_directory}/apps "
 
             command = (
                 "docker run -d --init -u frappe "
-                f"--restart always --hostname {self.name} "
+                f"--restart {restart_policy} --hostname {self.name} "
                 f"-p 127.0.0.1:{self.bench_config['web_port']}:8000 "
                 f"-p 127.0.0.1:{self.bench_config['socketio_port']}:9000 "
                 f"-p 127.0.0.1:{self.bench_config['codeserver_port']}:8088 " # TODO: change this port
                 f"-p {ssh_ip}:{ssh_port}:2200 "
                 f"-v {self.sites_directory}:{bench_directory}/sites "
-                f"-v {self.logs_directory}:{bench_directory}/logs " # TODO: this can be removed for devbox
+                f"-v {self.logs_directory}:{bench_directory}/logs "
                 f"-v {self.config_directory}:{bench_directory}/config "
                 f"{mounts} "
                 f"--name {self.name} {self.bench_config['docker_image']}"
