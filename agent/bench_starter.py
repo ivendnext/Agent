@@ -26,7 +26,7 @@ class Config:
     redis_failed_hash_key: str = "bench_start_failed"
     redis_failed_hash_expiry_mins: int = 15
     check_interval_seconds: int = 60
-    memory_reserve_percent: float = 25.0  # Reserve 25% of system memory
+    memory_reserve_percent: float = 30.0  # Reserve 30% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
@@ -190,31 +190,30 @@ class BenchStarter:
 
         return []
 
-    def _remove_from_queue(self, bench_name: list) -> bool:
+    def _remove_from_queue(self, bench_name: str, pipe=None):
         """Remove bench from the Redis queue after successful start."""
         try:
-            self.redis_client.lrem(Config.redis_queue_key, 1, bench_name)
+            client = pipe or self.redis_client
+            client.lrem(Config.redis_queue_key, 1, bench_name)
         except Exception as e:
             self.log(f"Error removing {bench_name} from start queue: {e}")
 
-    def _add_to_failed_queue(self, bench_name: str, reason: str) -> bool:
-        """Add a bench to the failed queue with expiry."""
+    def _move_to_failed_queue(self, bench_name: str, reason: str) -> bool:
+        """Atomically remove bench from queue and add to failed queue."""
         try:
-            failed_entry = {
-                'reason': reason,
-            }
+            with self.redis_client.pipeline() as pipe:
+                pipe.multi()
 
-            failed_key = f"{Config.redis_failed_hash_key}:{bench_name}"
-            self.redis_client.hset(failed_key, mapping=failed_entry)
+                self._remove_from_queue(bench_name, pipe)
 
-            # set expiry
-            expiry_seconds = Config.redis_failed_hash_expiry_mins * 60
-            self.redis_client.expire(failed_key, expiry_seconds)
-            return True
+                failed_key = f"{Config.redis_failed_hash_key}:{bench_name}"
+                pipe.hset(failed_key, mapping={'reason': reason})
+                pipe.expire(failed_key, Config.redis_failed_hash_expiry_mins * 60) # set expiry
+
+                # Execute all commands atomically
+                pipe.execute()
         except Exception as e:
-            self.log(f"Error adding {bench_name} to failed queue: {e}")
-
-        return False
+            self.log(f"Error moving {bench_name} to failed queue: {e}")
 
     def _process_batch(self) -> None:
         # Get current memory state
@@ -224,7 +223,7 @@ class BenchStarter:
 
         # Get pending benches from main queue
         pending_benches = self._get_pending_benches()
-        for i, bench_name in enumerate(pending_benches):
+        for bench_name in pending_benches:
             if not self.running:
                 break
 
@@ -242,8 +241,7 @@ class BenchStarter:
 
                 reason = "Failed to start container. Please try to queue again and/or contact support."
 
-            self._remove_from_queue(bench_name)
-            self._add_to_failed_queue(bench_name, reason)
+            self._move_to_failed_queue(bench_name, reason)
             self.log(f"Cannot start {bench_name}: {reason}")
 
     def start(self) -> None:
