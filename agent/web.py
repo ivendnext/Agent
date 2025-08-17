@@ -1611,7 +1611,7 @@ def bench_start(bench_name):
     except docker.errors.APIError as e:
         return {"message": "Internal Service Error."}, 500
 
-    message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 200
+    status = 200
     if container.status in ("running", "restarting"):
         message = "Bench is already running or restarting."
     else:
@@ -1620,6 +1620,7 @@ def bench_start(bench_name):
         if bench_name not in queue_items:
             # Add to the end of the queue (FIFO)
             redis_instance.rpush(Config.redis_queue_key, bench_name)
+            message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 202
         else:
             message = "Request for the bench to start is already enqueued."
 
@@ -1646,7 +1647,7 @@ def bench_status(bench_name):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
         queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
         if bench_name in queue_items:
-            return {"message": "Request for the bench to start is enqueued."}, 200
+            return {"message": "Request for the bench to start is enqueued."}, status
 
         # Check in failed hash
         failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "reason")

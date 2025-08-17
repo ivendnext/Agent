@@ -52,25 +52,21 @@ class BenchStopper:
             memory_stats = stats.get('memory_stats', {})
 
             if 'usage' in memory_stats:
-                usage_bytes = memory_stats['usage']
-                usage_mb = usage_bytes / (1024 * 1024)
-                self.mem_stats[container.name] = usage_mb
+                self.mem_stats[container.name] = memory_stats['usage']
         except Exception as e:
             self.log(f"Could not get memory stats for {container.name}: {e}")
 
 
     def _find_log_files_for_bench(self, bench_name: str):
-        """Find nginx log files associated with a bench."""
+        """Find log files associated with a bench."""
         log_files = []
         access_log_dir = Path(Config.access_log_path)
 
         if not access_log_dir.exists():
             return
 
-        # Look for log files that might be associated with this bench
         for pattern in [
             f"{bench_name}-access.log",
-            f"{bench_name.replace('-', '_')}-access.log",
         ]:
             found_files = list(access_log_dir.glob(pattern))
             log_files.extend(found_files)

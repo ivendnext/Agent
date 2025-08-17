@@ -119,8 +119,8 @@ class BenchStarter:
         if bench_name in self.container_mem_stats:
             mem_stat = self.container_mem_stats[bench_name]
             if mem_stat > 0:
-                self.log(f"Using historical memory for {bench_name}: {mem_stat}MB")
-                return mem_stat * 1024 * 1024
+                self.log(f"Using historical memory for {bench_name}: {mem_stat/(1024*1024)}MB")
+                return mem_stat
 
         # use bench config to figure out the memory - this is an estimate at best
         bench_config = self._load_bench_config(bench_name)
