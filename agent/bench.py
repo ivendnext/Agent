@@ -413,6 +413,9 @@ class Bench(Base):
 
     @step("Archive Site")
     def bench_archive_site(self, name, mariadb_root_password, force):
+        # TODO: add a request for bench starting to the starter in case of sleepy containers
+        # someone would need to again trigger archive site (manually or the archival job try it for a couple of times?)
+
         site_database, temp_user, temp_password = self.create_mariadb_user(
             name, mariadb_root_password, self.valid_sites[name].database
         )
