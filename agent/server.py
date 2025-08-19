@@ -53,6 +53,8 @@ class Server(Base):
         bench_directory = os.path.join(self.benches_directory, name)
         os.mkdir(bench_directory)
         directories = ["logs", "sites", "config"]
+        if config.get("for_devbox", None):
+            directories.append("apps")
         for directory in directories:
             os.mkdir(os.path.join(bench_directory, directory))
 
