@@ -777,7 +777,9 @@ class Bench(Base):
         # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
         if self.server.allow_sleepy_containers:
             with FileLock(f"/tmp/{self.name}.lock"):
-                _update_limits(self.server.is_container_running(self.name))
+                # TODO: queue the request to start the container (if the container was running)
+                # ref: https://github.com/ivendnext/Agent/pull/5#discussion_r2296589691
+                _update_limits(False)
         else:
            _update_limits(True)
 

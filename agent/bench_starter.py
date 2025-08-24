@@ -11,7 +11,6 @@ import json
 import signal
 import psutil
 import datetime
-from typing import Dict, List
 from filelock import FileLock
 
 import redis
@@ -50,7 +49,6 @@ class BenchStarter:
         self.running = False
 
     def _init_redis_client(self):
-        """Get or create Redis client with error handling."""
         try:
             self.redis_client = redis.Redis(
                 port=Config.redis_port,
@@ -61,14 +59,13 @@ class BenchStarter:
             raise
 
     def _init_docker_client(self):
-        """Get or create Docker client with error handling."""
         try:
             self.docker_client = docker.from_env()
         except Exception as e:
             self.log(f"Failed to connect to Docker: {e}")
             raise
 
-    def _get_system_memory_info(self) -> Dict[str, int]:
+    def _get_system_memory_info(self):
         """Get system memory information including swap."""
         memory = psutil.virtual_memory()
         swap = psutil.swap_memory()
@@ -87,15 +84,14 @@ class BenchStarter:
             'available_effective_bytes': available_effective_memory,
         }
 
-    def _get_memory_threshold_bytes(self, memory_info) -> int:
-        """Calculate minimum available memory threshold (25% of total effective memory)."""
+    def _get_memory_threshold_bytes(self, memory_info):
         # Use effective memory (RAM + swap) for threshold calculation
         total_effective_memory = memory_info['total_effective_bytes']
         # We want to maintain at least 25% of total memory as available
         min_available_threshold = int(total_effective_memory * (Config.memory_reserve_percent / 100))
         return min_available_threshold
 
-    def _load_memory_stats(self) -> Dict[str, Dict]:
+    def _load_memory_stats(self):
         """Load memory stats from the stats file."""
         try:
             with FileLock("/tmp/mem_stats.lock"):
@@ -106,7 +102,7 @@ class BenchStarter:
             self.log(f"Could not load memory stats file: {e}")
         return {}
 
-    def _load_bench_config(self, bench_name: str) -> Dict:
+    def _load_bench_config(self, bench_name: str):
         """Load bench configuration from config.json."""
         try:
             return Bench(bench_name, Server()).bench_config
@@ -114,7 +110,7 @@ class BenchStarter:
             self.log(f"Could not load config for bench {bench_name}: {e}")
         return {}
 
-    def _calculate_bench_memory_requirement(self, bench_name: str) -> int:
+    def _calculate_bench_memory_requirement(self, bench_name: str):
         # First try to get from memory stats file
         if bench_name in self.container_mem_stats:
             mem_stat = self.container_mem_stats[bench_name]
@@ -157,8 +153,7 @@ class BenchStarter:
 
         return True, ""
 
-    def _start_container(self, bench_name: str) -> bool:
-        """Start a container for the given bench."""
+    def _start_container(self, bench_name: str):
         try:
             with FileLock(f"/tmp/{bench_name}.lock"):
                 container = self.docker_client.containers.get(bench_name)
@@ -174,7 +169,7 @@ class BenchStarter:
 
         return False
 
-    def _get_pending_benches(self) -> List[str]:
+    def _get_pending_benches(self):
         """Get list of benches waiting to be started from Redis list."""
         try:
             # Get items from list (FIFO order)
@@ -198,7 +193,7 @@ class BenchStarter:
         except Exception as e:
             self.log(f"Error removing {bench_name} from start queue: {e}")
 
-    def _move_to_failed_queue(self, bench_name: str, reason: str) -> bool:
+    def _move_to_failed_queue(self, bench_name: str, reason: str):
         """Atomically remove bench from queue and add to failed queue."""
         try:
             with self.redis_client.pipeline() as pipe:
@@ -215,7 +210,7 @@ class BenchStarter:
         except Exception as e:
             self.log(f"Error moving {bench_name} to failed queue: {e}")
 
-    def _process_batch(self) -> None:
+    def _process_batch(self):
         # Get current memory state
         memory_info = self._get_system_memory_info()
         min_available_threshold = self._get_memory_threshold_bytes(memory_info)
@@ -244,7 +239,7 @@ class BenchStarter:
             self._move_to_failed_queue(bench_name, reason)
             self.log(f"Cannot start {bench_name}: {reason}")
 
-    def start(self) -> None:
+    def start(self):
         """Start the bench starter service."""
         retries = 3
         self.running = True
