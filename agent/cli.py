@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING
 import click
 import requests
 
+from agent.bench import Bench
 from agent.proxy import Proxy
 from agent.server import Server
+from agent.site import Site
 from agent.utils import get_timestamp
 
 if TYPE_CHECKING:
@@ -29,8 +31,19 @@ def setup():
 
 
 @cli.command()
-def update():
-    Server().update_agent_cli()
+@click.option("--restart-web-workers", default=True)
+@click.option("--restart-rq-workers", default=True)
+@click.option("--restart-redis", default=True)
+@click.option("--skip-repo-setup", default=False)
+@click.option("--skip-patches", default=False)
+def update(restart_web_workers, restart_rq_workers, restart_redis, skip_repo_setup, skip_patches):
+    Server().update_agent_cli(
+        restart_redis=restart_redis,
+        restart_rq_workers=restart_rq_workers,
+        restart_web_workers=restart_web_workers,
+        skip_repo_setup=skip_repo_setup,
+        skip_patches=skip_patches,
+    )
 
 
 @cli.command()
@@ -62,7 +75,8 @@ def ping_server(password: str):
 @click.option("--sentry-dsn", required=False, type=str)
 @click.option("--is_devbox_proxy", required=False, type=str, default=False)
 @click.option("--allow-sleepy-containers", is_flag=True)
-def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=None, allow_sleepy_containers=False):
+@click.option("--press-url", required=False, type=str)
+def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=None, allow_sleepy_containers=False, press_url=None):
     config = {
         "benches_directory": f"/home/{user}/benches",
         "devboxes_directory": f"/home/{user}/devboxes",
@@ -75,7 +89,10 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=
         "gunicorn_workers": 2 if not allow_sleepy_containers else 3,
         "web_port": 25052,
         "allow_sleepy_containers": allow_sleepy_containers,
+        "press_url": "https://frappecloud.com",
     }
+    if press_url:
+        config["press_url"] = press_url
     if proxy_ip:
         config["proxy_ip"] = proxy_ip
     if sentry_dsn:
@@ -85,6 +102,17 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=
 
     with open("config.json", "w") as f:
         json.dump(config, f, sort_keys=True, indent=4)
+
+
+@setup.command()
+def pyspy():
+    privileges_line = "frappe ALL = (root) NOPASSWD: /home/frappe/agent/env/bin/py-spy"
+    with open("/etc/sudoers.d/frappe", "a+") as sudoers:
+        sudoers.seek(0)
+        lines = sudoers.read().splitlines()
+
+        if privileges_line not in lines:
+            sudoers.write(privileges_line + "\n")
 
 
 @setup.command()
@@ -115,10 +143,10 @@ def nginx():
 def proxy(domain=None, press_url=None):
     proxy = Proxy()
     if domain:
-        config = proxy.config
+        config = proxy.get_config(for_update=True)
         config["domain"] = domain
         config["press_url"] = press_url
-        proxy.setconfig(config, indent=4)
+        proxy.set_config(config, indent=4)
     proxy.setup_proxy()
 
 
@@ -127,10 +155,10 @@ def proxy(domain=None, press_url=None):
 def standalone(domain=None):
     server = Server()
     if domain:
-        config = server.config
+        config = server.get_config(for_update=True)
         config["domain"] = domain
         config["standalone"] = True
-        server.setconfig(config, indent=4)
+        server.set_config(config, indent=4)
 
 
 @setup.command()
@@ -268,11 +296,15 @@ def bench():
 
 
 @bench.command()
-@click.argument("bench", required=False)
-def start(bench):
+@click.argument("bench", nargs=-1)
+def start(bench: tuple[str]):
+    server = Server()
+
     if bench:
-        return Server().benches[bench].start()
-    return Server().start_all_benches()
+        for b in bench:
+            server.benches[b].start()
+    else:
+        server.start_all_benches()
 
 
 @bench.command()
@@ -301,7 +333,17 @@ def console(config_path):
     if config_dir:
         try:
             locals()["server"] = Server(config_dir)
-            print(f"In namespace:\nserver = agent.server.Server('{config_dir}')")
+            locals()["Proxy"] = Proxy
+            locals()["Bench"] = Bench
+            locals()["Site"] = Site
+            print(f"""
+In namespace:
+server = agent.server.Server('{config_dir}')
+
+Proxy = agent.proxy.Proxy
+Bench = agent.bench.Bench
+Site = agent.site.Site
+""")
         except Exception:
             print(f"Could not initialize agent.server.Server('{config_dir}')")
 

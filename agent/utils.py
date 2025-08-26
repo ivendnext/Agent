@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import subprocess
+from collections import defaultdict
 from datetime import datetime, timedelta
 from math import ceil
 from typing import TYPE_CHECKING
@@ -48,12 +50,18 @@ def download_file(url, prefix):
     return local_filename
 
 
-def get_size(folder):
+def get_size(folder, ignore_dirs=None):
     """Returns the size of the folder in bytes. Ignores symlinks"""
     total_size = os.path.getsize(folder)
 
+    if ignore_dirs is None:
+        ignore_dirs = []
+
     for item in os.listdir(folder):
         itempath = os.path.join(folder, item)
+
+        if item in ignore_dirs:
+            continue
 
         if not os.path.islink(itempath):
             if os.path.isfile(itempath):
@@ -169,3 +177,44 @@ def get_mariadb_table_name_from_path(path: str) -> str:
     filename = os.path.splitext(filename)[0]
     # Decode the filename
     return decode_mariadb_filename(filename)
+
+
+def check_installed_pyspy(server_dir: str) -> bool:
+    return os.path.exists(os.path.join(server_dir, "env/bin/py-spy"))
+
+
+def get_supervisor_processes_status() -> dict[str, str | dict[str, str]]:
+    try:
+        output = subprocess.check_output("sudo supervisorctl status all", shell=True)
+        lines = output.decode("utf-8").strip().split("\n")
+
+        flat_status = {}
+
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            name = parts[0].strip()
+            state = parts[1].strip()
+
+            if not name.startswith("agent:"):
+                continue
+
+            # Strip `agent:` prefix if present
+            name = name[len("agent:") :]
+
+            flat_status[name] = state
+
+        nested_status = defaultdict(dict)
+
+        for name, state in flat_status.items():
+            # Match pattern like worker-1, worker-2, etc.
+            if "-" in name:
+                group, sub = name.split("-", 1)
+                nested_status[group][sub] = state
+            else:
+                nested_status[name] = state
+
+        return dict(nested_status)
+    except Exception:
+        return {}

@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
-
-import peewee
+from contextlib import suppress
 
 from agent.base import AgentException
-from agent.database_physical_backup import DatabaseConnectionClosedWithDatabase
+from agent.database import CustomPeeweeDB
+from agent.database_physical_backup import (
+    DatabaseConnectionClosedWithDatabase,
+    get_path_of_physical_backup_metadata,
+    is_db_connection_usable,
+    kill_other_db_connections,
+    run_sql_query,
+)
 from agent.database_server import DatabaseServer
 from agent.job import job, step
 from agent.utils import compute_file_hash, get_mariadb_table_name_from_path
@@ -22,10 +29,6 @@ class DatabasePhysicalRestore(DatabaseServer):
         target_db_root_password: str,
         target_db_port: int,
         target_db_host: str,
-        files_metadata: dict[str, dict[str, any]],
-        innodb_tables: list[str],
-        myisam_tables: list[str],
-        table_schema: str,
         backup_db_base_directory: str,
         target_db_base_directory: str = "/var/lib/mysql",
         restore_specific_tables: bool = False,
@@ -34,8 +37,10 @@ class DatabasePhysicalRestore(DatabaseServer):
         if tables_to_restore is None:
             tables_to_restore = []
 
-        self._target_db_instance: peewee.MySQLDatabase = None
-        self._target_db_instance_for_myisam: peewee.MySQLDatabase = None
+        self._target_db_instance: CustomPeeweeDB = None
+        self._target_db_instance_connection_id: int = None
+        self._target_db_instance_for_myisam: CustomPeeweeDB = None
+        self._target_db_instance_for_myisam_connection_id: int = None
         self.target_db = target_db
         self.target_db_user = "root"
         self.target_db_password = target_db_root_password
@@ -44,23 +49,25 @@ class DatabasePhysicalRestore(DatabaseServer):
         self.target_db_directory = os.path.join(target_db_base_directory, target_db)
 
         self.backup_db = backup_db
+        self.backup_db_base_directory = backup_db_base_directory
         self.backup_db_directory = os.path.join(backup_db_base_directory, backup_db)
 
-        self.files_metadata = files_metadata
-        self.innodb_tables = innodb_tables
-        self.myisam_tables = myisam_tables
-        self.table_schema = table_schema
         self.restore_specific_tables = restore_specific_tables
         self.tables_to_restore = tables_to_restore
 
-        if restore_specific_tables:
-            self.innodb_tables = [table for table in self.innodb_tables if table in tables_to_restore]
-            self.myisam_tables = [table for table in self.myisam_tables if table in tables_to_restore]
+        # Initialize the variables
+        self.files_metadata: dict[str, dict[str, str]] = {}
+        self.innodb_tables: list[str] = []
+        self.myisam_tables: list[str] = []
+        self.sequence_tables: list[str] = []
 
         super().__init__()
 
     @job("Physical Restore Database")
-    def restore_job(self):
+    def create_restore_job(self):
+        from filewarmer import FWUP
+
+        self.fwup = FWUP()
         self.validate_backup_files()
         self.validate_connection_to_target_db()
         self.warmup_myisam_files()
@@ -75,9 +82,39 @@ class DatabasePhysicalRestore(DatabaseServer):
         self.hold_write_lock_on_myisam_tables()
         self.perform_myisam_file_operations()
         self.unlock_all_tables()
+        self._close_db_connections()
+        self.perform_post_restoration_validation_and_fixes()
 
     @step("Validate Backup Files")
     def validate_backup_files(self):  # noqa: C901
+        # fetch the required metadata to proceed
+        backup_metadata_path = get_path_of_physical_backup_metadata(
+            self.backup_db_base_directory, self.backup_db
+        )
+        if not os.path.exists(backup_metadata_path):
+            raise Exception(f"Backup metadata not found for {self.backup_db}")
+
+        backup_metadata = None
+        with open(backup_metadata_path, "r") as f:
+            backup_metadata = json.load(f)
+        if not backup_metadata:
+            raise Exception(f"Backup metadata is empty for {self.backup_db}")
+
+        self.files_metadata = backup_metadata["files_metadata"]
+        self.innodb_tables = backup_metadata["innodb_tables"]
+        self.myisam_tables = backup_metadata["myisam_tables"]
+        self.sequence_tables = backup_metadata.get("sequence_tables", [])
+        self.table_schema = backup_metadata["table_schema"]
+        if self.restore_specific_tables:
+            # remove invalid tables from tables_to_restore
+            all_tables = self.innodb_tables + self.myisam_tables
+            self.tables_to_restore = [table for table in self.tables_to_restore if table in all_tables]
+
+            # remove the unwanted tables
+            self.innodb_tables = [table for table in self.innodb_tables if table in self.tables_to_restore]
+            self.myisam_tables = [table for table in self.myisam_tables if table in self.tables_to_restore]
+
+        # validate files
         files = os.listdir(self.backup_db_directory)
         output = ""
         invalid_files = set()
@@ -90,9 +127,7 @@ class DatabasePhysicalRestore(DatabaseServer):
             file_path = os.path.join(self.backup_db_directory, file)
             # validate file size
             file_size = os.path.getsize(file_path)
-            if file_size == file_metadata["size"]:
-                output += f"[VALID] [FILE SIZE] {file} - {file_size} bytes\n"
-            else:
+            if file_size != file_metadata["size"]:
                 output += f"[INVALID] [FILE SIZE] {file} - {file_size} bytes\n"
                 invalid_files.add(file)
                 continue
@@ -100,13 +135,9 @@ class DatabasePhysicalRestore(DatabaseServer):
             # if file checksum is provided, validate checksum
             if file_metadata["checksum"]:
                 checksum = compute_file_hash(file_path, raise_exception=True)
-                if checksum == file_metadata["checksum"]:
-                    output += f"[VALID] [CHECKSUM] {file} - {checksum}\n"
-                else:
+                if checksum != file_metadata["checksum"]:
                     output += f"[INVALID] [CHECKSUM] {file} - {checksum}\n"
                     invalid_files.add(file)
-            else:
-                output += f"[SKIP] [CHECKSUM] {file} - No\n"
 
         if invalid_files:
             output += "Invalid Files:\n"
@@ -119,6 +150,8 @@ class DatabasePhysicalRestore(DatabaseServer):
     @step("Validate Connection to Target Database")
     def validate_connection_to_target_db(self):
         self._get_target_db().execute_sql("SELECT 1;")
+        self._get_target_db_for_myisam().execute_sql("SELECT 1;")
+        self._kill_other_active_db_connections()
 
     @step("Warmup MyISAM Files")
     def warmup_myisam_files(self):
@@ -181,7 +214,8 @@ class DatabasePhysicalRestore(DatabaseServer):
         # it will reduce the time to drop tables and will not cause any block while dropping tables
         self._get_target_db().execute_sql("SET SESSION FOREIGN_KEY_CHECKS = 0;")
         for table in tables:
-            self._get_target_db().execute_sql(f"DROP TABLE IF EXISTS `{table}`;")
+            self._kill_other_active_db_connections()
+            self._get_target_db().execute_sql(self.get_drop_table_statement(table))
         self._get_target_db().execute_sql(
             "SET SESSION FOREIGN_KEY_CHECKS = 1;"
         )  # re-enable foreign key checks
@@ -191,7 +225,7 @@ class DatabasePhysicalRestore(DatabaseServer):
         if self.restore_specific_tables:
             sql_stmts = []
             for table in self.tables_to_restore:
-                sql_stmts.append(f"DROP TABLE IF EXISTS `{table}`;")
+                sql_stmts.append(self.get_drop_table_statement(table))
                 sql_stmts.append(self.get_create_table_statement(self.table_schema, table))
         else:
             # https://github.com/frappe/frappe/pull/26855
@@ -213,6 +247,9 @@ class DatabasePhysicalRestore(DatabaseServer):
         # it will reduce the time to drop tables and will not cause any block while dropping tables
         self._get_target_db().execute_sql("SET SESSION FOREIGN_KEY_CHECKS = 0;")
 
+        # kill other active db connections
+        self._kill_other_active_db_connections()
+
         # Drop and re-create the tables
         for sql_stmt in sql_stmts:
             if sql_stmt.strip():
@@ -226,6 +263,7 @@ class DatabasePhysicalRestore(DatabaseServer):
         # https://mariadb.com/kb/en/innodb-file-per-table-tablespaces/#foreign-key-constraints
         self._get_target_db().execute_sql("SET SESSION foreign_key_checks = 0;")
         for table in self.innodb_tables:
+            self._kill_other_active_db_connections()
             self._get_target_db().execute_sql(f"ALTER TABLE `{table}` DISCARD TABLESPACE;")
         self._get_target_db().execute_sql(
             "SET SESSION foreign_key_checks = 1;"
@@ -238,6 +276,7 @@ class DatabasePhysicalRestore(DatabaseServer):
     @step("Import InnoDB Tablespaces")
     def import_tablespaces_in_target_db(self):
         for table in self.innodb_tables:
+            self._kill_other_active_db_connections()
             self._get_target_db().execute_sql(f"ALTER TABLE `{table}` IMPORT TABLESPACE;")
 
     @step("Hold Write Lock on MyISAM Tables")
@@ -251,6 +290,7 @@ class DatabasePhysicalRestore(DatabaseServer):
         if not self.myisam_tables:
             return
         tables = [f"`{table}` WRITE" for table in self.myisam_tables]
+        self._kill_other_active_db_connections()
         self._get_target_db_for_myisam().execute_sql("LOCK TABLES {};".format(", ".join(tables)))
 
     @step("Copying MyISAM Table Files")
@@ -261,6 +301,39 @@ class DatabasePhysicalRestore(DatabaseServer):
     def unlock_all_tables(self):
         self._get_target_db().execute_sql("UNLOCK TABLES;")
         self._get_target_db_for_myisam().execute_sql("UNLOCK TABLES;")
+
+    @step("Validate And Fix Tables")
+    def perform_post_restoration_validation_and_fixes(self):
+        innodb_tables_with_fts = self._get_innodb_tables_with_fts_index()
+        """
+        FLUSH TABLES ... FOR EXPORT does not support FULLTEXT indexes.
+        https://dev.mysql.com/doc/refman/8.4/en/innodb-table-import.html#:~:text=in%20the%20operation.-,Limitations,-The%20Transportable%20Tablespaces
+
+        Need to drop all fulltext indexes of InnoDB tables.
+        Then, optimize table to fix existing corruptions and rebuild table (if needed).
+        Then, recreate the fulltext indexes.
+        """
+
+        for table in innodb_tables_with_fts:
+            """
+            No need to waste time on checking whether index is corrupted or not
+            Because, physical restoration will not work for FULLTEXT index.
+            """
+            self.recreate_fts_indexes(table)
+
+        """
+        MyISAM table corruption can generally happen due to mismatch of no of records in MYD file.
+
+        myisamchk can't find and fix this issue.
+        Because this out of sync happen after creating a blank MyISAM table and just copying MYF & MYI files.
+
+        Usually, DB Restart will fix this issue. But we can't do in live database.
+        So running `REPAIR TABLE ... USE_FRM` can fix the issue.
+        https://dev.mysql.com/doc/refman/8.4/en/myisam-repair.html
+        """
+        for table in self.myisam_tables:
+            if self.is_table_corrupted(table) and not self.repair_myisam_table(table):
+                raise Exception(f"Failed to repair table {table}")
 
     def _warmup_files(self, file_paths: list[str]):
         """
@@ -274,8 +347,8 @@ class DatabasePhysicalRestore(DatabaseServer):
 
         Ref - https://docs.aws.amazon.com/ebs/latest/userguide/ebs-initialize.html
         """
-        for file in file_paths:
-            subprocess.run(["dd", "if=" + file, "of=/dev/null", "bs=1M"], check=True)
+
+        self.fwup.warmup(file_paths, method="io_uring")
 
     def _perform_file_operations(self, engine: str):
         for file in os.listdir(self.backup_db_directory):
@@ -296,13 +369,167 @@ class DatabasePhysicalRestore(DatabaseServer):
                 os.path.join(self.target_db_directory, file),
             )
 
-    def _get_target_db(self) -> peewee.MySQLDatabase:
-        if self._target_db_instance is not None:
-            if not self._target_db_instance.is_connection_usable():
+    def is_table_need_to_be_restored(self, table_name: str) -> bool:
+        if not self.restore_specific_tables:
+            # Ensure the tale_name is not a FTS table
+            return not re.search(
+                r"(FTS|fts)_[0-9a-f]+_(?:[0-9a-f]+_)?(?:INDEX|index|BEING|being|CONFIG|config|DELETED|deleted)",
+                table_name,
+            )
+        return table_name in self.innodb_tables or table_name in self.myisam_tables
+
+    def is_db_file_need_to_be_restored(self, file_name: str) -> bool:
+        return self.is_table_need_to_be_restored(get_mariadb_table_name_from_path(file_name))
+
+    def is_sequence_table(self, table_name: str) -> bool:
+        return table_name in self.sequence_tables
+
+    def get_create_table_statement(self, sql_dump, table_name) -> str:
+        if self.is_sequence_table(table_name):
+            # Define the regex pattern to match the CREATE SEQUENCE statement
+            pattern = re.compile(rf"CREATE SEQUENCE `{table_name}`[\s\S]*?;", re.DOTALL)
+        else:
+            # Define the regex pattern to match the CREATE TABLE statement
+            pattern = re.compile(rf"CREATE TABLE `{table_name}`[\s\S]*?;(?=\s*(?=\n|$))", re.DOTALL)
+
+        # Search for the CREATE TABLE statement in the SQL dump
+        match = pattern.search(sql_dump)
+        if match:
+            return match.group(0)
+
+        if self.is_sequence_table(table_name):
+            raise Exception(f"CREATE SEQUENCE statement for {table_name} not found in SQL dump")
+        else:  # noqa: RET506
+            raise Exception(f"CREATE TABLE statement for {table_name} not found in SQL dump")
+
+    def get_drop_table_statement(self, table_name) -> str:
+        if self.is_sequence_table(table_name):
+            return f"DROP SEQUENCE IF EXISTS `{table_name}`;"
+
+        return f"DROP TABLE IF EXISTS `{table_name}`;"
+
+    def is_table_corrupted(self, table_name: str) -> bool:
+        result = run_sql_query(
+            self._get_target_db(raise_error_on_connection_closed=False),
+            f"CHECK TABLE `{table_name}` QUICK;",
+        )
+        """
+        +-----------------------------------+-------+----------+------------------------------------------------------+
+        | Table                             | Op    | Msg_type | Msg_text                                             |
+        +-----------------------------------+-------+----------+------------------------------------------------------+
+        | _8edd549f4b072174.__global_search | check | warning  | Size of indexfile is: 22218752      Should be: 4096  |
+        | _8edd549f4b072174.__global_search | check | warning  | Size of datafile is:  31303496       Should be: 0    |
+        | _8edd549f4b072174.__global_search | check | error    | Record-count is not ok; is     152774   Should be: 0 |
+        | _8edd549f4b072174.__global_search | check | warning  | Found     172605 key parts. Should be: 0             |
+        | _8edd549f4b072174.__global_search | check | error    | Corrupt                                              |
+        +-----------------------------------+-------+----------+------------------------------------------------------+
+
+        +-------------------------------------------+-------+----------+--------------------------------------------------------+
+        | Table                                     | Op    | Msg_type | Msg_text                                               |
+        +-------------------------------------------+-------+----------+--------------------------------------------------------+
+        | _8edd549f4b072174.energy_point_log_id_seq | check | note     | The storage engine for the table doesn't support check |
+        +-------------------------------------------+-------+----------+--------------------------------------------------------+
+        """  # noqa: E501
+        isError = False
+        for row in result:
+            if row[2] == "error" or (row[2] == "warning" and table_name in self.myisam_tables):
+                isError = True
+                break
+        return isError
+
+    def repair_myisam_table(self, table_name: str) -> bool:
+        self._kill_other_active_db_connections()
+        result = run_sql_query(
+            self._get_target_db(raise_error_on_connection_closed=False),
+            f"REPAIR TABLE `{table_name}` USE_FRM;",
+        )
+        """
+        +---------------------------------------------------+--------+----------+----------+
+        | Table                                             | Op     | Msg_type | Msg_text |
+        +---------------------------------------------------+--------+----------+----------+
+        | _8edd549f4b072174.tabInsights Query Execution Log | repair  | status   | OK       |
+        +---------------------------------------------------+--------+----------+----------+
+
+        Msg Type can be status, error, info, note, or warning
+        """
+        isErrorOccurred = False
+        for row in result:
+            if row[2] == "error":
+                isErrorOccurred = True
+                break
+
+        return not isErrorOccurred
+
+    def recreate_fts_indexes(self, table: str):
+        fts_indexes = self._get_fts_indexes_of_table(table)
+        for index_name, _ in fts_indexes.items():
+            self._kill_other_active_db_connections()
+            run_sql_query(
+                self._get_target_db(raise_error_on_connection_closed=False),
+                f"ALTER TABLE `{table}` DROP INDEX IF EXISTS `{index_name}`;",
+            )
+        # Optimize table to fix existing corruptions
+        self._kill_other_active_db_connections()
+        run_sql_query(
+            self._get_target_db(raise_error_on_connection_closed=False), f"OPTIMIZE TABLE `{table}`;"
+        )
+        # Recreate the indexes
+        for index_name, columns in fts_indexes.items():
+            self._kill_other_active_db_connections()
+            run_sql_query(
+                self._get_target_db(raise_error_on_connection_closed=False),
+                f"ALTER TABLE `{table}` ADD FULLTEXT INDEX `{index_name}` ({columns});",
+            )
+
+    def _get_innodb_tables_with_fts_index(self):
+        rows = run_sql_query(
+            self._get_target_db(raise_error_on_connection_closed=False),
+            f"""
+        SELECT
+            DISTINCT(t.TABLE_NAME)
+        FROM
+            information_schema.STATISTICS s
+        JOIN
+            information_schema.TABLES t
+            ON s.TABLE_SCHEMA = t.TABLE_SCHEMA
+            AND s.TABLE_NAME = t.TABLE_NAME
+        WHERE
+            s.INDEX_TYPE = 'FULLTEXT'
+            AND t.TABLE_SCHEMA = '{self.target_db}'
+            AND t.ENGINE = 'InnoDB';
+        """,
+        )
+        return [row[0] for row in rows]
+
+    def _get_fts_indexes_of_table(self, table: str) -> dict[str, str]:
+        rows = run_sql_query(
+            self._get_target_db(raise_error_on_connection_closed=False),
+            f"""
+        SELECT
+            INDEX_NAME, group_concat(column_name ORDER BY seq_in_index) AS columns
+        FROM
+            information_schema.statistics
+        WHERE
+            TABLE_SCHEMA = '{self.target_db}'
+            AND TABLE_NAME = '{table}'
+            AND INDEX_TYPE = 'FULLTEXT'
+        GROUP BY
+            INDEX_NAME;
+        """,
+        )
+        return {row[0]: row[1] for row in rows}
+
+    def _get_target_db(self, raise_error_on_connection_closed: bool = True) -> CustomPeeweeDB:
+        if self._target_db_instance is not None and not is_db_connection_usable(self._target_db_instance):
+            if raise_error_on_connection_closed:
                 raise DatabaseConnectionClosedWithDatabase()
+            self._target_db_instance = None
+            self._target_db_instance_connection_id = None
+
+        if self._target_db_instance is not None:
             return self._target_db_instance
 
-        self._target_db_instance = peewee.MySQLDatabase(
+        self._target_db_instance = CustomPeeweeDB(
             self.target_db,
             user=self.target_db_user,
             password=self.target_db_password,
@@ -312,15 +539,19 @@ class DatabasePhysicalRestore(DatabaseServer):
         self._target_db_instance.connect()
         # Set session wait timeout to 4 hours [EXPERIMENTAL]
         self._target_db_instance.execute_sql("SET SESSION wait_timeout = 14400;")
+        # Fetch the connection id
+        self._target_db_instance_connection_id = int(
+            self._target_db_instance.execute_sql("SELECT CONNECTION_ID();").fetchone()[0]
+        )
         return self._target_db_instance
 
-    def _get_target_db_for_myisam(self) -> peewee.MySQLDatabase:
+    def _get_target_db_for_myisam(self) -> CustomPeeweeDB:
         if self._target_db_instance_for_myisam is not None:
-            if not self._target_db_instance_for_myisam.is_connection_usable():
+            if not is_db_connection_usable(self._target_db_instance_for_myisam):
                 raise DatabaseConnectionClosedWithDatabase()
             return self._target_db_instance_for_myisam
 
-        self._target_db_instance_for_myisam = peewee.MySQLDatabase(
+        self._target_db_instance_for_myisam = CustomPeeweeDB(
             self.target_db,
             user=self.target_db_user,
             password=self.target_db_password,
@@ -331,29 +562,31 @@ class DatabasePhysicalRestore(DatabaseServer):
         self._target_db_instance_for_myisam.connect()
         # Set session wait timeout to 4 hours [EXPERIMENTAL]
         self._target_db_instance_for_myisam.execute_sql("SET SESSION wait_timeout = 14400;")
+        # Fetch the connection id
+        self._target_db_instance_for_myisam_connection_id = int(
+            self._target_db_instance_for_myisam.execute_sql("SELECT CONNECTION_ID();").fetchone()[0]
+        )
         return self._target_db_instance_for_myisam
 
-    def is_table_need_to_be_restored(self, table_name: str) -> bool:
-        if not self.restore_specific_tables:
-            return True
-        return table_name in self.innodb_tables or table_name in self.myisam_tables
+    def _close_db_connections(self):
+        if self._target_db_instance is not None:
+            with suppress(Exception):
+                self._target_db_instance.close()
+        if self._target_db_instance_for_myisam is not None:
+            with suppress(Exception):
+                self._target_db_instance_for_myisam.close()
 
-    def is_db_file_need_to_be_restored(self, file_name: str) -> bool:
-        return self.is_table_need_to_be_restored(get_mariadb_table_name_from_path(file_name))
+    def _kill_other_active_db_connections(self):
+        current_connection_ids = []
+        if self._target_db_instance is not None:
+            current_connection_ids.append(self._target_db_instance_connection_id)
+        if self._target_db_instance_for_myisam is not None:
+            current_connection_ids.append(self._target_db_instance_for_myisam_connection_id)
 
-    def get_create_table_statement(self, sql_dump, table_name) -> str:
-        # Define the regex pattern to match the CREATE TABLE statement
-        pattern = re.compile(rf"CREATE TABLE `{table_name}`.*?;", re.DOTALL)
+        if not current_connection_ids:
+            return
 
-        # Search for the CREATE TABLE statement in the SQL dump
-        match = pattern.search(sql_dump)
-        if match:
-            return match.group(0)
-
-        raise Exception(f"CREATE TABLE statement for {table_name} not found in SQL dump")
+        kill_other_db_connections(self._target_db_instance, current_connection_ids)
 
     def __del__(self):
-        if self._target_db_instance is not None:
-            self._target_db_instance.close()
-        if self._target_db_instance_for_myisam is not None:
-            self._target_db_instance_for_myisam.close()
+        self._close_db_connections()

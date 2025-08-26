@@ -5,6 +5,7 @@ import os
 import platform
 import shutil
 import socket
+import subprocess
 import tempfile
 import time
 from contextlib import suppress
@@ -14,6 +15,12 @@ from jinja2 import Environment, PackageLoader
 from passlib.hash import pbkdf2_sha256 as pbkdf2
 from peewee import MySQLDatabase
 
+from agent.application_storage_analyzer import (
+    analyze_benches_structure,
+    parse_docker_df_output,
+    parse_total_disk_usage_output,
+    to_bytes,
+)
 from agent.base import AgentException, Base
 from agent.bench import Bench
 from agent.devbox import Devbox
@@ -21,10 +28,13 @@ from agent.exceptions import BenchNotExistsException
 from agent.job import Job, Step, job, step
 from agent.patch_handler import run_patches
 from agent.site import Site
+from agent.utils import get_supervisor_processes_status
 
 
 class Server(Base):
     def __init__(self, directory=None):
+        super().__init__()
+
         self.directory = directory or os.getcwd()
         self.config_file = os.path.join(self.directory, "config.json")
         self.name = self.config["name"]
@@ -38,6 +48,10 @@ class Server(Base):
         self.error_pages_directory = os.path.join(self.directory, "repo", "agent", "pages")
         self.job = None
         self.step = None
+
+    @property
+    def press_url(self):
+        return self.config.get("press_url", "https://frappecloud.com")
 
     def docker_login(self, registry):
         url = registry["url"]
@@ -111,6 +125,19 @@ class Server(Base):
             pass  # container does not exist
         else:
             raise Exception("Container exists")
+
+    def get_image_size(self, image_tag: str):
+        try:
+            return (
+                to_bytes(
+                    self.execute(
+                        f'docker image ls --format "{{{{.Tag}}}} {{{{.Size}}}}" | grep -E "^{image_tag} "'
+                    )["output"].split()[-1]
+                )
+                / 1024**3
+            )
+        except AgentException:
+            pass
 
     @job("Archive Bench", priority="low")
     def archive_bench(self, name):
@@ -212,12 +239,12 @@ class Server(Base):
     @job("Update Site Pull", priority="low")
     def update_site_pull_job(self, name, source, target, activate):
         source = Bench(source, self)
-        target = Bench(target, self)
         site = Site(name, source)
 
         site.enable_maintenance_mode()
         site.wait_till_ready()
 
+        target = Bench(target, self)
         self.move_site(site, target)
         source.setup_nginx()
         target.setup_nginx_target()
@@ -246,7 +273,6 @@ class Server(Base):
             before_migrate_scripts = {}
 
         source = Bench(source, self)
-        target = Bench(target, self)
         site = Site(name, source)
 
         site.enable_maintenance_mode()
@@ -256,6 +282,7 @@ class Server(Base):
             site.clear_backup_directory()
             site.tablewise_backup()
 
+        target = Bench(target, self)
         self.move_site(site, target)
 
         source.setup_nginx()
@@ -353,13 +380,13 @@ class Server(Base):
         # Dangerous method (no backup),
         # use update_site_migrate if you don't know what you're doing
         source = Bench(source, self)
-        target = Bench(target, self)
         site = Site(name, source)
 
         if deactivate:  # cases when python is broken in bench
             site.enable_maintenance_mode()
             site.wait_till_ready()
 
+        target = Bench(target, self)
         self.move_site(site, target)
 
         source.setup_nginx()
@@ -401,8 +428,22 @@ class Server(Base):
             shutil.move(destination, archived_site_path)
         shutil.move(site.directory, target.sites_directory)
 
-    def execute(self, command, directory=None, skip_output_log=False):
-        return super().execute(command, directory=directory, skip_output_log=skip_output_log)
+    def execute(self, command, directory=None, skip_output_log=False, non_zero_throw=True):
+        return super().execute(
+            command, directory=directory, skip_output_log=skip_output_log, non_zero_throw=non_zero_throw
+        )
+
+    @job("Pull Docker Images", priority="high")
+    def pull_docker_images(self, image_tags: list[str], registry: dict[str, str]) -> None:
+        self._pull_docker_images(image_tags, registry)
+
+    @step("Pull Docker Images")
+    def _pull_docker_images(self, image_tags: list[str], registry: dict[str, str]) -> None:
+        self.docker_login(registry)
+
+        for image_tag in image_tags:
+            command = f"docker pull {image_tag}"
+            self.execute(command, directory=self.directory)
 
     @job("Reload NGINX")
     def restart_nginx(self):
@@ -423,9 +464,9 @@ class Server(Base):
         self.update_config({"proxysql_admin_password": password})
 
     def update_config(self, value):
-        config = self.config
+        config = self.get_config(for_update=True)
         config.update(value)
-        self.setconfig(config, indent=4)
+        self.set_config(config, indent=4)
 
     def setup_registry(self):
         self.update_config({"registry": True})
@@ -521,20 +562,109 @@ class Server(Base):
         self.execute("sudo supervisorctl restart agent:web")
         run_patches()
 
-    def update_agent_cli(self):
+    def update_agent_cli(  # noqa: C901
+        self,
+        restart_redis=True,
+        restart_rq_workers=True,
+        restart_web_workers=True,
+        skip_repo_setup=False,
+        skip_patches=False,
+    ):
         directory = os.path.join(self.directory, "repo")
-        self.execute("git reset --hard", directory=directory)
-        self.execute("git clean -fd", directory=directory)
-        self.execute("git fetch upstream", directory=directory)
-        self.execute("git merge --ff-only upstream/master", directory=directory)
+        if skip_repo_setup:
+            self.execute("git reset --hard", directory=directory)
+            self.execute("git clean -fd", directory=directory)
+            self.execute("git fetch upstream", directory=directory)
+            self.execute("git merge --ff-only upstream/master", directory=directory)
+            self.execute("./env/bin/pip install -e repo", directory=self.directory)
 
-        self.execute("./env/bin/pip install -e repo", directory=self.directory)
+        supervisor_status = get_supervisor_processes_status()
 
-        self.execute("sudo supervisorctl restart agent:")
+        # Stop web service
+        if restart_web_workers and supervisor_status.get("web") == "RUNNING":
+            self.execute("sudo supervisorctl stop agent:web", non_zero_throw=False)
+
+        # Stop required services
+        if restart_rq_workers:
+            for worker_id in supervisor_status.get("worker", {}):
+                self.execute(f"sudo supervisorctl stop agent:worker-{worker_id}", non_zero_throw=False)
+
+        # Stop NGINX Reload Manager if it's a proxy server
+        is_proxy_server = self.config.get("domain") and self.config.get("name").startswith("n")
+        if is_proxy_server:
+            self.execute("sudo supervisorctl stop agent:nginx_reload_manager", non_zero_throw=False)
+
+        # Stop redis
+        if restart_redis and supervisor_status.get("redis") == "RUNNING":
+            self.execute("sudo supervisorctl stop agent:redis", non_zero_throw=False)
+
         self.setup_supervisor()
 
+        # Start back services in same order
+        supervisor_status = get_supervisor_processes_status()
+        if restart_redis or supervisor_status.get("redis") != "RUNNING":
+            self.execute("sudo supervisorctl start agent:redis")
+
+        # Start NGINX Reload Manager if it's a proxy server
+        if is_proxy_server:
+            self.execute("sudo supervisorctl start agent:nginx_reload_manager")
+
+        if restart_rq_workers:
+            for i in range(self.config["workers"]):
+                self.execute(f"sudo supervisorctl start agent:worker-{i}")
+
+        if restart_web_workers:
+            self.execute("sudo supervisorctl start agent:web")
+
         self.setup_nginx()
-        run_patches()
+
+        if not skip_patches:
+            run_patches()
+
+    @staticmethod
+    def run_ncdu_command(path: str, excludes: list | None = None) -> str | None:
+        cmd = ["ncdu", path, "-o", "/dev/stdout"]
+        if excludes:
+            for item in excludes:
+                cmd.extend(["--exclude", item])
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            return result.stdout if result.returncode == 0 else None
+        except subprocess.TimeoutExpired:
+            return None
+
+    def get_storage_breakdown(self) -> dict:
+        app_storage_analysis = {}
+        failed_message = "Failed to analyze storage"
+
+        benches_output = self.run_ncdu_command(
+            "/home/frappe/benches/", excludes=["node_modules", "env", "assets"]
+        )
+        docker_output = self.execute("docker system df --format '{{.Size}}'").get("output")
+        total_output = self.execute(
+            f"df -B1 {'/opt/volumes/benches' if os.path.exists('/opt/volumes/benches') else '/'}"
+        ).get("output")
+
+        if total_output:
+            total_data = parse_total_disk_usage_output(total_output)
+            app_storage_analysis["total"] = total_data
+
+        if benches_output:
+            benches_data = analyze_benches_structure(benches_output)
+            if benches_data:
+                app_storage_analysis["benches"] = benches_data
+
+        if docker_output:
+            docker_data = parse_docker_df_output(docker_output)
+            app_storage_analysis["docker"] = docker_data
+
+        return app_storage_analysis or {"error": failed_message}
 
     def get_agent_version(self):
         directory = os.path.join(self.directory, "repo")
@@ -544,6 +674,7 @@ class Server(Base):
             "upstream": self.execute("git remote get-url upstream", directory=directory)["output"],
             "show": self.execute("git show", directory=directory)["output"],
             "python": platform.python_version(),
+            "services": get_supervisor_processes_status(),
         }
 
     def status(self, mariadb_root_password):
@@ -733,18 +864,22 @@ class Server(Base):
 
     def _generate_supervisor_config(self):
         supervisor_config = os.path.join(self.directory, "supervisor.conf")
+        data = {
+            "web_port": self.config["web_port"],
+            "redis_port": self.config["redis_port"],
+            "gunicorn_workers": self.config.get("gunicorn_workers", 2),
+            "workers": self.config["workers"],
+            "directory": self.directory,
+            "user": self.config["user"],
+            "sentry_dsn": self.config.get("sentry_dsn"),
+            "allow_sleepy_containers": self.allow_sleepy_containers,
+        }
+        if self.config.get("name").startswith("n"):
+            data["is_proxy_server"] = True
+
         self._render_template(
             "agent/supervisor.conf.jinja2",
-            {
-                "web_port": self.config["web_port"],
-                "redis_port": self.config["redis_port"],
-                "gunicorn_workers": self.config.get("gunicorn_workers", 2),
-                "workers": self.config["workers"],
-                "directory": self.directory,
-                "user": self.config["user"],
-                "sentry_dsn": self.config.get("sentry_dsn"),
-                "allow_sleepy_containers": self.allow_sleepy_containers,
-            },
+            data,
             supervisor_config,
         )
 

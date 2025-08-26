@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import subprocess
 import time
+from random import randint
 
-import peewee
 import requests
 
+from agent.database import CustomPeeweeDB
 from agent.database_server import DatabaseServer
 from agent.job import job, step
 from agent.utils import compute_file_hash, decode_mariadb_filename
@@ -28,7 +31,8 @@ class DatabasePhysicalBackup(DatabaseServer):
         if not databases:
             raise ValueError("At least one database is required")
         # Instance variable for internal use
-        self._db_instances: dict[str, peewee.MySQLDatabase] = {}
+        self._db_instances: dict[str, CustomPeeweeDB] = {}
+        self._db_instances_connection_id: dict[str, int] = {}
         self._db_tables_locked: dict[str, bool] = {db: False for db in databases}
 
         # variables
@@ -47,31 +51,30 @@ class DatabasePhysicalBackup(DatabaseServer):
 
         self.innodb_tables: dict[str, list[str]] = {db: [] for db in self.databases}
         self.myisam_tables: dict[str, list[str]] = {db: [] for db in self.databases}
-        self.files_metadata: dict[str, dict[str, str]] = {db: {} for db in self.databases}
+        self.sequence_tables: dict[str, list[str]] = {db: [] for db in self.databases}
+        self.files_metadata: dict[str, dict[str, dict[str, str]]] = {db: {} for db in self.databases}
         self.table_schemas: dict[str, str] = {}
 
         super().__init__()
 
     @job("Physical Backup Database", priority="low")
-    def backup_job(self):
+    def create_backup_job(self):
+        self.remove_backups_metadata()
         self.fetch_table_info()
         self.flush_tables()
         self.flush_changes_to_disk()
         self.validate_exportable_files()
         self.export_table_schemas()
         self.collect_files_metadata()
+        self.store_backup_metadata()
         self.create_snapshot()  # Blocking call
         self.unlock_all_tables()
-        # Return the data [Required for restoring the backup]
-        data = {}
-        for db_name in self.databases:
-            data[db_name] = {
-                "innodb_tables": self.innodb_tables[db_name],
-                "myisam_tables": self.myisam_tables[db_name],
-                "table_schema": self.table_schemas[db_name],
-                "files_metadata": self.files_metadata[db_name],
-            }
-        return data
+        self.remove_backups_metadata()
+
+    def remove_backups_metadata(self):
+        with contextlib.suppress(Exception):
+            for db_name in self.databases:
+                os.remove(get_path_of_physical_backup_metadata(self.db_base_path, db_name))
 
     @step("Fetch Database Tables Information")
     def fetch_table_info(self):
@@ -81,7 +84,7 @@ class DatabasePhysicalBackup(DatabaseServer):
         for db_name in self.databases:
             db_instance = self.get_db(db_name)
             query = (
-                "SELECT table_name, ENGINE FROM information_schema.tables "
+                "SELECT table_name, engine, table_type FROM information_schema.tables "
                 "WHERE table_schema = DATABASE() AND table_type != 'VIEW' "
                 "ORDER BY table_name"
             )
@@ -89,10 +92,24 @@ class DatabasePhysicalBackup(DatabaseServer):
             for row in data:
                 table = row[0]
                 engine = row[1]
+                table_type = row[2]
                 if engine == "InnoDB":
                     self.innodb_tables[db_name].append(table)
                 elif engine == "MyISAM":
                     self.myisam_tables[db_name].append(table)
+
+                if table_type == "SEQUENCE":
+                    """
+                    Sequence table can use any engine
+
+                    In mariadb-dump result, sequence table will have specific SQL for creating/dropping
+                    https://mariadb.com/kb/en/create-sequence/
+                    https://mariadb.com/kb/en/drop-sequence/
+
+                    Store the table references, so that we can handle this in a different manner
+                    during physical restore
+                    """
+                    self.sequence_tables[db_name].append(table)
 
     @step("Flush Database Tables")
     def flush_tables(self):
@@ -112,6 +129,7 @@ class DatabasePhysicalBackup(DatabaseServer):
             tables = self.innodb_tables[db_name] + self.myisam_tables[db_name]
             tables = [f"`{table}`" for table in tables]
             flush_table_export_query = "FLUSH TABLES {} FOR EXPORT;".format(", ".join(tables))
+            self._kill_other_db_connections(db_name)
             self.get_db(db_name).execute_sql(flush_table_export_query)
             self._db_tables_locked[db_name] = True
 
@@ -205,6 +223,29 @@ class DatabasePhysicalBackup(DatabaseServer):
                     else None,
                 }
 
+    @step("Store Backup Metadata")
+    def store_backup_metadata(self):
+        """
+        Store the backup metadata in the database
+        """
+        data = {}
+        for db_name in self.databases:
+            data = {
+                "innodb_tables": self.innodb_tables[db_name],
+                "myisam_tables": self.myisam_tables[db_name],
+                "sequence_tables": self.sequence_tables[db_name],
+                "table_schema": self.table_schemas[db_name],
+                "files_metadata": self.files_metadata[db_name],
+            }
+            file_path = get_path_of_physical_backup_metadata(self.db_base_path, db_name)
+            with open(file_path, "w") as f:
+                json.dump(data, f)
+
+            os.chmod(file_path, 0o777)
+
+            with open(file_path, "rb", buffering=0) as f:
+                os.fsync(f.fileno())
+
     @step("Create Database Snapshot")
     def create_snapshot(self):
         """
@@ -220,9 +261,9 @@ class DatabasePhysicalBackup(DatabaseServer):
                     "key": self.snapshot_request_key,
                 },
             )
-            if response.status_code in [500, 502, 503, 504] and retries <= 10:
+            if response.status_code in [417, 500, 502, 503, 504] and retries <= 10:
                 retries += 1
-                time.sleep(10)
+                time.sleep(15 + randint(2, 8))
                 continue
 
             response.raise_for_status()
@@ -233,7 +274,8 @@ class DatabasePhysicalBackup(DatabaseServer):
         for db_name in self.databases:
             self._unlock_tables(db_name)
 
-    def export_table_schema(self, db_name) -> str:
+    def export_table_schema(self, db_name: str) -> str:
+        self._kill_other_db_connections(db_name)
         command = [
             "mariadb-dump",
             "-u",
@@ -257,7 +299,7 @@ class DatabasePhysicalBackup(DatabaseServer):
         the tables will be unlocked automatically
         """
 
-    def get_db(self, db_name: str) -> peewee.MySQLDatabase:
+    def get_db(self, db_name: str) -> CustomPeeweeDB:
         instance = self._db_instances.get(db_name, None)
         if instance is not None:
             if not instance.is_connection_usable():
@@ -267,7 +309,7 @@ class DatabasePhysicalBackup(DatabaseServer):
             return instance
         if db_name not in self.databases:
             raise ValueError(f"Database {db_name} not found")
-        self._db_instances[db_name] = peewee.MySQLDatabase(
+        self._db_instances[db_name] = CustomPeeweeDB(
             db_name,
             user=self.db_user,
             password=self.db_password,
@@ -277,7 +319,14 @@ class DatabasePhysicalBackup(DatabaseServer):
         self._db_instances[db_name].connect()
         # Set session wait timeout to 4 hours [EXPERIMENTAL]
         self._db_instances[db_name].execute_sql("SET SESSION wait_timeout = 14400;")
+        # Fetch the connection id
+        self._db_instances_connection_id[db_name] = int(
+            self._db_instances[db_name].execute_sql("SELECT CONNECTION_ID();").fetchone()[0]
+        )
         return self._db_instances[db_name]
+
+    def _kill_other_db_connections(self, db_name: str):
+        kill_other_db_connections(self.get_db(db_name), [self._db_instances_connection_id[db_name]])
 
     def __del__(self):
         for db_name in self.databases:
@@ -298,3 +347,55 @@ class DatabaseExportFileNotFoundError(Exception):
 
 class DatabaseConnectionClosedWithDatabase(Exception):
     pass
+
+
+def get_path_of_physical_backup_metadata(db_base_path: str, database_name: str) -> str:
+    return os.path.join(db_base_path, database_name, "physical_backup_meta.json")
+
+
+def is_db_connection_usable(db: CustomPeeweeDB) -> bool:
+    try:
+        if not db.is_connection_usable():
+            return False
+        db.execute_sql("SELECT 1;")
+        return True
+    except Exception:
+        return False
+
+
+def run_sql_query(db: CustomPeeweeDB, query: str) -> list[str]:
+    """
+    Return the result of the query as a list of rows
+    """
+    cursor = db.execute_sql(query)
+    if not cursor.description:
+        return []
+    rows = cursor.fetchall()
+    return [row for row in rows]
+
+
+def kill_other_db_connections(db: CustomPeeweeDB, thread_ids: list[int]):
+    """
+    We deactivate site before backup/restore and activate site after backup/restore.
+    But, connection through ProxySQL or Frappe Cloud devtools can still be there.
+
+    it's important to kill all the connections except current threads.
+    """
+
+    # Get process list
+    thread_ids_str = ",".join([str(thread_id) for thread_id in thread_ids])
+    query = (
+        "SELECT ID from INFORMATION_SCHEMA.PROCESSLIST "
+        "where DB=DATABASE() AND USER!='system user' "
+        f"AND ID NOT IN ({thread_ids_str});"
+    )
+
+    rows = run_sql_query(db, query)
+    db_pids = [row[0] for row in rows]
+    if not db_pids:
+        return
+
+    # Kill the processes
+    for pid in db_pids:
+        with contextlib.suppress(Exception):
+            run_sql_query(db, f"KILL {pid};")

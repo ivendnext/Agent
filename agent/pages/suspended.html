@@ -22,6 +22,9 @@
 
             .logo {
                 text-align: center;
+                display: flex;
+                justify-content: center;
+                align-items: center;
             }
 
             .logo svg {
@@ -106,6 +109,9 @@
                         </g>
                     </g>
                 </svg>
+                <div class="logo-text">
+                    <h1>Frappe Cloud</h1>
+                </div>
             </div>
             <div class="message-container">
                 <div class="alert-icon">
@@ -125,4 +131,10 @@
             </div>
         </div>
     </body>
+
+    <script>
+        const dashboardUrl = document.querySelector('.dashboard-url');
+        const siteName = window.location.hostname;
+        dashboardUrl.href = `https://frappecloud.com/dashboard/sites/${siteName}`;
+    </script>
 </html>

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from flask import Flask, Response, jsonify, request
 from passlib.hash import pbkdf2_sha256 as pbkdf2
 from playhouse.shortcuts import model_to_dict
+from redis.exceptions import ConnectionError as RedisConnectionError
 from rq.exceptions import NoSuchJobError
 from rq.job import Job as RQJob
 from rq.job import JobStatus
@@ -30,6 +31,8 @@ from agent.job import Job as AgentJob
 from agent.job import JobModel, connection
 from agent.minio import Minio
 from agent.monitor import Monitor
+from agent.nginx_reload_manager import NginxReloadManager
+from agent.nginx_reload_manager import ReloadStatus as NginxReloadStatus
 from agent.proxy import Proxy
 from agent.proxysql import ProxySQL
 from agent.security import Security
@@ -37,6 +40,7 @@ from agent.server import Server
 from agent.ssh import SSHProxy
 from agent.bench_starter import Config
 
+from agent.utils import check_installed_pyspy
 
 if TYPE_CHECKING:
     from datetime import datetime, timedelta
@@ -96,6 +100,10 @@ def skip_auth(func):
 
 @application.before_request
 def validate_access_token():
+    exempt_endpoints = ["get_metrics"]
+    if request.endpoint in exempt_endpoints:
+        return None
+
     try:
         if application.debug:
             return None
@@ -172,6 +180,21 @@ def ping():
     return {"message": "pong"}
 
 
+@application.route("/process-snapshot/<string:bench_name>")
+def get_snapshots(bench_name: str):
+    server = Server()
+    bench = server.benches.get(bench_name)
+
+    if not bench:
+        return {"message": f"No such bench {bench_name}"}, 400
+
+    if not check_installed_pyspy(server.directory):
+        return {"message": "PySpy is not installed on this server"}, 400
+
+    pids = bench.get_worker_pids()
+    return bench.take_snapshot(pids)
+
+
 @application.route("/ping_job", methods=["POST"])
 def ping_job():
     return {
@@ -236,9 +259,58 @@ def cleanup_unused_files():
     return {"job": job}
 
 
+@application.route("/server/storage-breakdown", methods=["GET"])
+def get_storage_breakdown():
+    output = Server().get_storage_breakdown()
+    json_output = json.dumps(output, indent=2)
+    return Response(json_output, mimetype="application/json")
+
+
+@application.route("/server/image-size/<string:image_tag>", methods=["GET"])
+def get_docker_image_size(image_tag: str):
+    size = Server().get_image_size(image_tag)
+    return {"size": size}
+
+
+@application.route("/server/pull-images", methods=["POST"])
+def pull_docker_images():
+    data = request.json
+    job = Server().pull_docker_images(data.get("image_tags"), data.get("registry"))
+    return {"job": job}
+
+
 @application.route("/benches")
 def get_benches():
     return {name: bench.dump() for name, bench in Server().benches.items()}
+
+
+@application.route("/benches/metrics")
+def get_metrics():
+    from agent.exporter import get_metrics
+
+    benches_metrics = []
+    server = Server()
+
+    for name, bench in server.benches.items():
+        rq_port = bench.bench_config.get("rq_port")
+        if rq_port is not None:
+            try:
+                metrics = get_metrics(name, rq_port)
+                benches_metrics.append(metrics)
+            except RedisConnectionError:
+                """
+                Ignore RedisConnectionError, don't log it
+
+                Two Reasons -
+                1. Bench is not running, so we miss the metrics
+                2. By mistake, we have pushed `rq_port` to many config while bench update, that means we
+                    don't have open port for this bench
+                """
+                pass
+            except Exception as e:
+                log.error(f"Failed to get metrics for {name} on port {rq_port}: {e}")
+
+    return Response(benches_metrics, mimetype="text/plain")
 
 
 @application.route("/benches/<string:bench>")
@@ -570,8 +642,14 @@ def backup_site(bench, site):
     data = request.json or {}
     with_files = data.get("with_files")
     offsite = data.get("offsite")
+    keep_files_locally_after_offsite_backup = data.get("keep_files_locally_after_offsite_backup", False)
 
-    job = Server().benches[bench].sites[site].backup_job(with_files, offsite)
+    job = (
+        Server()
+        .benches[bench]
+        .sites[site]
+        .backup_job(with_files, offsite, keep_files_locally_after_offsite_backup)
+    )
     return {"job": job}
 
 
@@ -901,6 +979,9 @@ def add_database_index(bench, site):
 )
 @validate_bench_and_site
 def get_site_apps(bench, site):
+    format = request.args.get("format")
+    if format == "json":
+        return {"data": Server().benches[bench].sites[site].apps_as_json}
     return {"data": Server().benches[bench].sites[site].apps}
 
 
@@ -949,7 +1030,6 @@ def proxy_add_host():
         data["name"],
         data["target"],
         data["certificate"],
-        data.get("skip_reload", False),
     )
     return {"job": job}
 
@@ -1003,7 +1083,14 @@ def proxy_rename_upstream(upstream):
 @application.route("/proxy/upstreams/<string:upstream>/sites", methods=["POST"])
 def proxy_add_upstream_site(upstream):
     data = request.json
-    job = Proxy().add_site_to_upstream_job(upstream, data["name"], data.get("skip_reload", False), data.get("status", None))
+    job = Proxy().add_site_to_upstream_job(upstream, data["name"]. data.get("status", None))
+    return {"job": job}
+
+
+@application.route("/proxy/upstreams/<string:upstream>/domains", methods=["POST"])
+def proxy_add_upstream_site_domain(upstream):
+    data = request.json
+    job = Proxy().add_domain_to_upstream_job(upstream, data["domain"])
     return {"job": job}
 
 
@@ -1013,7 +1100,7 @@ def proxy_add_upstream_site(upstream):
 )
 def proxy_remove_upstream_site(upstream, site):
     data = request.json
-    job = Proxy().remove_site_from_upstream_job(upstream, site, data.get("skip_reload", False))
+    job = Proxy().remove_site_from_upstream_job(upstream, site, data.get("extra_domains", []))
     return {"job": job}
 
 
@@ -1028,7 +1115,6 @@ def proxy_rename_upstream_site(upstream, site):
         data["domains"],
         site,
         data["new_name"],
-        data.get("skip_reload", False),
     )
     return {"job": job}
 
@@ -1039,7 +1125,13 @@ def proxy_rename_upstream_site(upstream, site):
 )
 def update_site_status(upstream, site):
     data = request.json
-    job = Proxy().update_site_status_job(upstream, site, data["status"], data.get("skip_reload", False))
+    job = Proxy().update_site_status_job(
+        upstream,
+        site,
+        data["status"],
+        data.get("extra_domains", []),
+        skip_reload=data.get("skip_reload", False),
+    )
     return {"job": job}
 
 
@@ -1062,7 +1154,7 @@ def physical_backup_database():
         site_backup_name=data["site_backup"]["name"],
         snapshot_trigger_url=data["site_backup"]["snapshot_trigger_url"],
         snapshot_request_key=data["site_backup"]["snapshot_request_key"],
-    ).backup_job()
+    ).create_backup_job()
     return {"job": job}
 
 
@@ -1075,14 +1167,10 @@ def physical_restore_database():
         target_db_root_password=data["target_db_root_password"],
         target_db_port=3306,
         target_db_host=data["private_ip"],
-        files_metadata=data.get("files_metadata", {}),
-        innodb_tables=data.get("innodb_tables", []),
-        myisam_tables=data.get("myisam_tables", []),
-        table_schema=data.get("table_schema", ""),
         backup_db_base_directory=data.get("backup_db_base_directory", ""),
         restore_specific_tables=data.get("restore_specific_tables", False),
         tables_to_restore=data.get("tables_to_restore", []),
-    ).restore_job()
+    ).create_restore_job()
     return {"job": job}
 
 
@@ -1095,6 +1183,12 @@ def get_binary_logs():
 def get_database_processes():
     data = request.json
     return jsonify(DatabaseServer().processes(**data))
+
+
+@application.route("/database/variables", methods=["POST"])
+def get_database_variables():
+    data = request.json
+    return jsonify(DatabaseServer().variables(**data))
 
 
 @application.route("/database/locks", methods=["POST"])
@@ -1153,6 +1247,56 @@ def fetch_column_statistics():
 def explain():
     data = request.json
     return jsonify(DatabaseServer().explain_query(**data))
+
+
+@application.route("/database/binlogs/purge", methods=["POST"])
+def purge_binlog():
+    data = request.json
+    return jsonify(DatabaseServer().purge_binlog(**data))
+
+
+@application.route("/database/binlogs/list", methods=["GET"])
+def get_binlogs():
+    return jsonify(DatabaseServer().get_binlogs())
+
+
+@application.route("/database/binlogs/upload", methods=["POST"])
+def upload_binlogs_to_s3():
+    data = request.json
+    job = DatabaseServer().upload_binlogs_to_s3_job(**data)
+    return {"job": job}
+
+
+@application.route("/database/binlogs/indexer/add", methods=["POST"])
+def add_binlogs_to_indexer():
+    data = request.json
+    job = DatabaseServer().add_binlogs_to_index_job(data["binlogs"])
+    return {"job": job}
+
+
+@application.route("/database/binlogs/indexer/remove", methods=["POST"])
+def remove_binlogs_from_indexer():
+    data = request.json
+    job = DatabaseServer().remove_binlogs_from_index_job(data["binlogs"])
+    return {"job": job}
+
+
+@application.route("/database/binlogs/indexer/timeline", methods=["POST"])
+def get_timeline():
+    data = request.json
+    return jsonify(DatabaseServer().get_timeline(**data))
+
+
+@application.route("/database/binlogs/indexer/search", methods=["POST"])
+def get_row_ids():
+    data = request.json
+    return jsonify(DatabaseServer().get_row_ids(**data))
+
+
+@application.route("/database/binlogs/indexer/query", methods=["POST"])
+def get_queries():
+    data = request.json
+    return jsonify(DatabaseServer().get_queries(**data))
 
 
 @application.route("/ssh/users", methods=["POST"])
@@ -1223,11 +1367,14 @@ def get_status_from_rq(job, redis):
     return status
 
 
-def to_dict(model):
+def to_dict(model):  # noqa: C901
     redis = connection()
+    nginx_reload_manager = NginxReloadManager()
     if isinstance(model, JobModel):
         job = model_to_dict(model, backrefs=True)
         status_from_rq = get_status_from_rq(job, redis)
+        nginx_reload_status: NginxReloadStatus = None
+        job_status_depends_on_async_nginx_reload = False
         if status_from_rq:
             # Override status from JobModel if rq says the job is already ended
             TERMINAL_STATUSES = ["Success", "Failure"]
@@ -1248,6 +1395,28 @@ def to_dict(model):
                     -1,
                 )
             ]
+            if job["status"] == "Success" and step["name"] == "Reload NGINX" and step["status"] == "Success":
+                # If the `RQ Job` or `RQ Step` has been failed during queuing or at any part
+                # There we dont need to lookup the status of the NGINX reload from redis
+                if not nginx_reload_status:
+                    nginx_reload_status = nginx_reload_manager.get_status(
+                        job["agent_job_id"],
+                        not_found_status=NginxReloadStatus.Success,
+                        # If the job doesn't exist in redis, we assume it was successful
+                    )
+                job_status_depends_on_async_nginx_reload = True
+                if nginx_reload_status in [NginxReloadStatus.Success, NginxReloadStatus.Failure]:
+                    step["status"] = nginx_reload_status.value
+                else:
+                    step["status"] = "Running"
+
+        if job_status_depends_on_async_nginx_reload:
+            # If status is Queued, mark as Running
+            if nginx_reload_status == NginxReloadStatus.Queued:
+                job["status"] = "Running"
+            # If reload has failed, mark it as failure
+            elif nginx_reload_status == NginxReloadStatus.Failure:
+                job["status"] = "Failure"
     else:
         job = list(map(model_to_dict, model))
     return job
@@ -1471,6 +1640,7 @@ def docker_execute(bench: str):
         command=data.get("command"),
         subdir=data.get("subdir"),
         non_zero_throw=False,
+        as_root=data.get("as_root"),
     )
 
     result["start"] = result["start"].isoformat()

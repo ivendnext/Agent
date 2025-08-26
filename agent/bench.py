@@ -22,7 +22,7 @@ import requests
 
 from agent.app import App
 from agent.base import AgentException, Base
-from agent.exceptions import SiteNotExistsException
+from agent.exceptions import InvalidSiteConfigException, SiteNotExistsException
 from agent.job import job, step
 from agent.site import Site
 from agent.utils import download_file, end_execution, get_execution_result, get_size
@@ -44,6 +44,8 @@ if TYPE_CHECKING:
 
 class Bench(Base):
     def __init__(self, name: str, server: Server, mounts=None):
+        super().__init__()
+
         self.name = name
         self.server = server
         self.directory = os.path.join(self.server.benches_directory, name)
@@ -172,14 +174,15 @@ class Bench(Base):
             non_zero_throw=non_zero_throw,
         )
 
-    def docker_execute(self, command, input=None, subdir=None, non_zero_throw=True):
+    def docker_execute(self, command, input=None, subdir=None, non_zero_throw=True, as_root: bool = False):
         interactive = "-i" if input else ""
+        as_root = "-u root" if as_root else ""
         workdir = "/home/frappe/frappe-bench"
         if subdir:
             workdir = os.path.join(workdir, subdir)
 
         if self.bench_config.get("single_container"):
-            command = f"docker exec -w {workdir} {interactive} {self.name} {command}"
+            command = f"docker exec {as_root} -w {workdir} {interactive} {self.name} {command}"
             if self.server.allow_sleepy_containers:
                 with FileLock(f"/tmp/{self.name}.lock"):
                     # just a sanity check for if the container is running
@@ -191,7 +194,7 @@ class Bench(Base):
             task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
                 "output"
             ].split()[0]
-            command = f"docker exec -w {workdir} {interactive} {service}.1.{task} {command}"
+            command = f"docker exec {as_root} -w {workdir} {interactive} {service}.1.{task} {command}"
 
         return self.execute(command, input=input, non_zero_throw=non_zero_throw)
 
@@ -331,6 +334,35 @@ class Bench(Base):
             traceback.print_exc()
         return lines
 
+    def _parse_pids(self, lines):
+        pids = []
+        lines = lines.strip().split("\n")
+
+        for line in lines:
+            parts = line.strip().split()
+            name, pid = parts[0], parts[1]
+            pids.append((name, pid))
+
+        return pids
+
+    def get_worker_pids(self):
+        """Get all the processes running gunicorn for now"""
+        return self._parse_pids(self.execute(f"docker top {self.name} | grep gunicorn")["output"])
+
+    def take_snapshot(self, pid_info: list[tuple[str, str]]):
+        snapshots = {}
+        pyspy_bin = os.path.join(self.server.directory, "env/bin/py-spy")
+
+        for name, pid in pid_info:
+            try:
+                snapshots[f"{name}:{pid}"] = json.loads(
+                    self.execute(f"sudo {pyspy_bin} dump --pid {pid} --json")["output"]
+                )
+            except AgentException as e:
+                snapshots[f"{name}:{pid}"] = str(e)
+
+        return snapshots
+
     def status(self):
         status = {
             "sites": {site: {"scheduler": True, "web": True} for site in self.sites},
@@ -390,7 +422,7 @@ class Bench(Base):
         site = Site(name, self)
         site.update_config(default_config)
         try:
-            site.restore(
+            site.restore_site(
                 mariadb_root_password,
                 admin_password,
                 files["database"],
@@ -435,7 +467,7 @@ class Bench(Base):
         if not os.path.exists(download_directory):
             os.mkdir(download_directory)
         directory = tempfile.mkdtemp(prefix="agent-upload-", suffix=f"-{name}", dir=download_directory)
-        database_file = download_file(database_url, prefix=directory)
+        database_file = download_file(database_url, prefix=directory) if database_url else ""
         private_file = download_file(private_url, prefix=directory) if private_url else ""
         public_file = download_file(public_url, prefix=directory) if public_url else ""
         return {
@@ -534,11 +566,11 @@ class Bench(Base):
         return self.rebuild()
 
     @step("Rebuild Bench Assets")
-    def rebuild(self, apps: list[str] | None = None):
+    def rebuild(self, apps: list[str] | None = None, is_inplace: bool = False):
         if not apps:
             return self.docker_execute("bench build")
 
-        if len(apps) == 1:
+        if len(apps) == 1 and not is_inplace:
             return self.docker_execute(f"bench build --app {apps[0]}")
 
         return self.docker_execute(f"bench build --apps {','.join(apps)}")
@@ -564,9 +596,9 @@ class Bench(Base):
         bench_config: dict | None = None,
     ):
         if common_site_config:
-            new_common_site_config = self.config
+            new_common_site_config = self.get_config(for_update=True)
             new_common_site_config.update(common_site_config)
-            self.setconfig(new_common_site_config)
+            self.set_config(new_common_site_config)
 
         if bench_config:
             new_bench_config = self.bench_config
@@ -718,6 +750,8 @@ class Bench(Base):
             ssh_ip = self.bench_config.get("private_ip", "127.0.0.1")
 
             restart_policy = "unless-stopped" if self.server.allow_sleepy_containers else "always"
+            rq_port = self.bench_config.get("rq_port")
+            rq_port_mapping = f"-p 127.0.0.1:{rq_port}:11000 "
 
             bench_directory = "/home/frappe/frappe-bench"
             mounts = self.prepare_mounts_on_host(bench_directory)
@@ -730,7 +764,8 @@ class Bench(Base):
                 f"--restart {restart_policy} --hostname {self.name} "
                 f"-p 127.0.0.1:{self.bench_config['web_port']}:8000 "
                 f"-p 127.0.0.1:{self.bench_config['socketio_port']}:9000 "
-                f"-p 127.0.0.1:{self.bench_config['codeserver_port']}:8088 " # TODO: change this port
+                f"-p 127.0.0.1:{self.bench_config['codeserver_port']}:8088 "
+                f"{rq_port_mapping if rq_port else ''}"
                 f"-p {ssh_ip}:{ssh_port}:2200 "
                 f"-v {self.sites_directory}:{bench_directory}/sites "
                 f"-v {self.logs_directory}:{bench_directory}/logs "
@@ -831,9 +866,12 @@ class Bench(Base):
                 sites[directory] = Site(directory, self)
             except json.decoder.JSONDecodeError as jde:
                 output = self.readable_jde_err(f"Error parsing JSON in {directory}", jde)
-                self.execute(
-                    f"echo '{output}';exit {int(validate_configs)}",
-                )  # exit 1 to make sure the job fails and shows output
+                try:
+                    self.execute(
+                        f"echo '{output}';exit {int(validate_configs)}",
+                    )  # exit 1 to make sure the job fails and shows output
+                except AgentException as e:
+                    raise InvalidSiteConfigException(e.data, directory) from e
             except Exception:
                 pass
         return sites
@@ -841,8 +879,11 @@ class Bench(Base):
     def get_site(self, site):
         try:
             return self.valid_sites[site]
-        except KeyError as exc:
-            raise SiteNotExistsException(site, self.name) from exc
+        except KeyError as e:
+            raise SiteNotExistsException(site, self.name) from e
+        except InvalidSiteConfigException as e:
+            if e.site == site:
+                raise
 
     @property
     def step_record(self):
@@ -859,13 +900,23 @@ class Bench(Base):
         }
 
     @property
-    def bench_config(self):
+    def bench_config(self) -> dict:
         with open(self.bench_config_file, "r") as f:
             return json.load(f)
 
     def set_bench_config(self, value, indent=1):
-        with open(self.bench_config_file, "w") as f:
-            json.dump(value, f, indent=indent, sort_keys=True)
+        """
+        To avoid partial writes, we need to first write the config to a temporary file,
+        then rename it to the original file.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as temp_file:
+            json.dump(value, temp_file, indent=indent, sort_keys=True)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+            temp_file.close()
+
+        shutil.copy2(temp_file.name, self.bench_config_file)
+        os.remove(temp_file.name)
 
     @job("Patch App")
     def patch_app(
@@ -948,7 +999,7 @@ class Bench(Base):
             self.migrate_sites(sites)
 
         if should_run["rebuild_frontend"]:
-            self.rebuild(apps=[app["app"] for app in apps])
+            self.rebuild(apps=[app["app"] for app in apps], is_inplace=True)
 
         # commit container changes
         self.commit_container_changes(image)
