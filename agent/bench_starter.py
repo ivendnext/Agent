@@ -218,6 +218,9 @@ class BenchStarter:
 
         # Get pending benches from main queue
         pending_benches = self._get_pending_benches()
+        if pending_benches:
+            self.container_mem_stats = self._load_memory_stats()
+
         for bench_name in pending_benches:
             if not self.running:
                 break
@@ -249,7 +252,6 @@ class BenchStarter:
                 time.sleep(Config.check_interval_seconds)
                 self.log("Starting Bench Container Starter")
 
-                self.container_mem_stats = self._load_memory_stats()
                 self._init_redis_client()
                 self._init_docker_client()
 
