@@ -37,7 +37,7 @@ command=bash -c "{{ directory }}/repo/wait-for-it.sh redis://127.0.0.1:{{ redis_
 environment=PYTHONUNBUFFERED=1
 autostart=true
 autorestart=true
-stopwaitsecs=15
+stopwaitsecs=30
 stdout_logfile={{ directory }}/logs/bench_starter.log
 stderr_logfile={{ directory }}/logs/bench_starter.error.log
 user={{ user }}
@@ -48,7 +48,7 @@ command=bash -c "{{ directory }}/repo/wait-for-it.sh redis://127.0.0.1:{{ redis_
 environment=PYTHONUNBUFFERED=1
 autostart=true
 autorestart=true
-stopwaitsecs=15
+stopwaitsecs=30
 stdout_logfile={{ directory }}/logs/bench_stopper.log
 stderr_logfile={{ directory }}/logs/bench_stopper.error.log
 user={{ user }}
