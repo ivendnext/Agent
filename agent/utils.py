@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from math import ceil
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
+from filelock import FileLock
 
 import requests
 
@@ -218,3 +219,25 @@ def get_supervisor_processes_status() -> dict[str, str | dict[str, str]]:
         return dict(nested_status)
     except Exception:
         return {}
+
+
+class ContainerLockManager:
+    def __init__(self):
+        self._locks = []            # List of FileLock
+        self._locked_names = set()  # Track acquired container names
+
+    def acquire(self, container_name):
+        if container_name in self._locked_names:
+            return  # Already acquired
+
+        # TODO: add timeout
+        lock = FileLock(f"/tmp/{container_name}.lock")
+        lock.acquire()
+        self._locks.append(lock)
+        self._locked_names.add(container_name)
+
+    def release_all(self):
+        for lock in self._locks:
+            lock.release()
+        self._locks.clear()
+        self._locked_names.clear()
