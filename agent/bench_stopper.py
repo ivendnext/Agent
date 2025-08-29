@@ -1,3 +1,4 @@
+import sys
 import os
 import time
 import datetime
@@ -22,6 +23,7 @@ class BenchStopper:
 
     def __init__(self):
         self.running = False
+        self.sleeping = False
         self.docker_client = None
         self.mem_stats = {}
         self._setup_signal_handlers()
@@ -35,6 +37,8 @@ class BenchStopper:
         """Handle shutdown signals."""
         self.log(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+        if self.sleeping:
+            sys.exit(0)
 
     def _init_docker_client(self) -> docker.DockerClient:
         try:
@@ -182,7 +186,9 @@ class BenchStopper:
 
         while self.running:
             try:
+                self.sleeping = True
                 time.sleep(Config.check_interval_minutes * 60)
+                self.sleeping = False
 
                 self.log("Starting Bench Stopper")
                 self._init_docker_client()

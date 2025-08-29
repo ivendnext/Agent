@@ -5,6 +5,7 @@ This service monitors a Redis queue for bench start requests and starts containe
 in batches while respecting server memory limits and container memory requirements.
 """
 
+import sys
 import os
 import time
 import json
@@ -36,6 +37,7 @@ class BenchStarter:
         self.redis_client = None
         self.docker_client = None
         self.running = False
+        self.sleeping = False
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -47,6 +49,8 @@ class BenchStarter:
         """Handle shutdown signals."""
         self.log(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+        if self.sleeping:
+            sys.exit(0)
 
     def _init_redis_client(self):
         try:
@@ -249,9 +253,11 @@ class BenchStarter:
 
         while self.running:
             try:
+                self.sleeping = True
                 time.sleep(Config.check_interval_seconds)
-                self.log("Starting Bench Container Starter")
+                self.sleeping = False
 
+                self.log("Starting Bench Container Starter")
                 self._init_redis_client()
                 self._init_docker_client()
 
