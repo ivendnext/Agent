@@ -184,11 +184,12 @@ class Bench(Base):
         if self.bench_config.get("single_container"):
             command = f"docker exec {as_root} -w {workdir} {interactive} {self.name} {command}"
             if self.server.allow_sleepy_containers:
-                get_container_lock_manager().acquire(self.name)
-                # just a sanity check for if the container is running
-                if not self.server.is_container_running(self.name):
-                    raise Exception(f"The bench container {self.name} - is not running or something else happened")
-                return self.execute(command, input=input, non_zero_throw=non_zero_throw)
+                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), None)
+                with ctx.acquire(param):
+                    # just a sanity check for if the container is running
+                    if not self.server.is_container_running(self.name):
+                        raise Exception(f"The bench container {self.name} - is not running or something else happened")
+                    return self.execute(command, input=input, non_zero_throw=non_zero_throw)
         else:
             service = f"{self.name}_worker_default"
             task = self.execute(f"docker service ps -f desired-state=Running -q --no-trunc {service}")[
@@ -788,8 +789,9 @@ class Bench(Base):
 
         if self.bench_config.get("single_container"):
             if self.server.allow_sleepy_containers:
-                get_container_lock_manager().acquire(self.name)
-                return _stop_and_remove_single()
+                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), None)
+                with ctx.acquire(param):
+                    return _stop_and_remove_single()
             return _stop_and_remove_single()
         return self.execute(f"docker stack rm {self.name}")
 
@@ -811,10 +813,10 @@ class Bench(Base):
 
         # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
         if self.server.allow_sleepy_containers:
-            get_container_lock_manager().acquire(self.name)
-            # TODO: queue the request to start the container (if the container was running)
-            # ref: https://github.com/ivendnext/Agent/pull/5#discussion_r2296589691
-            _update_limits(False)
+            with get_container_lock_manager().acquire(self.name):
+                # TODO: queue the request to start the container (if the container was running)
+                # ref: https://github.com/ivendnext/Agent/pull/5#discussion_r2296589691
+                _update_limits(False)
         else:
            _update_limits(True)
 

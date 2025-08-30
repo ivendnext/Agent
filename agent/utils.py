@@ -224,15 +224,25 @@ def get_supervisor_processes_status() -> dict[str, str | dict[str, str]]:
 class ContainerLockManager:
     def __init__(self):
         self._locks = {}
+        self._container_name = self._lock = None
 
     def acquire(self, container_name):
         if container_name in self._locks:
-            return  # Already acquired
+            self._container_name = self._lock = None
+            return self
 
-        # TODO: add timeout
-        lock = FileLock(f"/tmp/{container_name}.lock")
-        lock.acquire()
-        self._locks[container_name] = lock
+        self._lock = FileLock(f"/tmp/{container_name}.lock")
+        self._container_name = container_name
+        return self
+
+    def __enter__(self):
+        if self._lock:
+            # TODO: add timeout
+            self._lock.acquire()
+            self._locks[self._container_name] = self._lock
+
+    def __exit__(self):
+        pass
 
     def release_all(self):
         for _, lock in self._locks.items():

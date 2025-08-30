@@ -223,7 +223,11 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
 
 
 def get_container_lock_manager():
-    return bench_container_lock_manager.get()
+    try:
+        return bench_container_lock_manager.get()
+    except LookupError:
+        # if called out of job context
+        return None
 
 
 def get_agent_job_id():
