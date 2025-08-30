@@ -143,14 +143,12 @@ class BenchStopper:
             self._update_container_memory_usage(container)
 
             if self._should_stop_container(container):
-                with FileLock(f"/tmp/{container.name}.lock", timeout=0):
+                with FileLock(f"/tmp/{container.name}.lock", blocking=False):
                     container.stop()
                     self.log(f"Stopped inactive container: {container.name}")
 
         except docker.errors.NotFound:
             self.log(f"Container {container.name} not found when trying to stop")
-        except docker.errors.APIError as e:
-            self.log(f"Docker API error: {e}")
         except Timeout:
             self.log(f"Could not acquire lock for {container.name}, skipping")
         except Exception as e:

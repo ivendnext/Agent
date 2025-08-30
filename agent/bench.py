@@ -184,7 +184,7 @@ class Bench(Base):
         if self.bench_config.get("single_container"):
             command = f"docker exec {as_root} -w {workdir} {interactive} {self.name} {command}"
             if self.server.allow_sleepy_containers:
-                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), None)
+                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), 60)
                 with ctx.acquire(param):
                     # just a sanity check for if the container is running
                     if not self.server.is_container_running(self.name):
@@ -789,7 +789,7 @@ class Bench(Base):
 
         if self.bench_config.get("single_container"):
             if self.server.allow_sleepy_containers:
-                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), None)
+                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), 60)
                 with ctx.acquire(param):
                     return _stop_and_remove_single()
             return _stop_and_remove_single()

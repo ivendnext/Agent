@@ -12,7 +12,7 @@ import json
 import signal
 import psutil
 import datetime
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 import redis
 import docker
@@ -159,7 +159,7 @@ class BenchStarter:
 
     def _start_container(self, bench_name: str):
         try:
-            with FileLock(f"/tmp/{bench_name}.lock"):
+            with FileLock(f"/tmp/{bench_name}.lock", timeout=60):
                 container = self.docker_client.containers.get(bench_name)
                 if container.status in ("exited", "stopped"):
                     container.start()
@@ -168,6 +168,8 @@ class BenchStarter:
             return True
         except docker.errors.NotFound:
             self.log(f"Container {bench_name} not found")
+        except Timeout:
+            self.log(f"Could not acquire lock for {bench_name}, skipping")
         except Exception as e:
             self.log(f"Failed to start container {bench_name}: {e}")
 
