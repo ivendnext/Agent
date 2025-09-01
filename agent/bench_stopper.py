@@ -143,7 +143,7 @@ class BenchStopper:
             self._update_container_memory_usage(container)
 
             if self._should_stop_container(container):
-                with FileLock(f"/tmp/{container.name}.lock", blocking=False):
+                with FileLock(f"/tmp/{container.name}.lock", timeout=0):
                     container.stop()
                     self.log(f"Stopped inactive container: {container.name}")
 

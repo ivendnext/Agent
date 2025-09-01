@@ -39,7 +39,7 @@ if os.environ.get("SENTRY_DSN"):
         pass
 
 
-bench_container_lock_manager = ContextVar("bench_container_lock_manager")
+job_level_container_lock_manager = ContextVar("job_level_container_lock_manager")
 agent_database = SqliteDatabase(
     "jobs.sqlite3",
     timeout=15,
@@ -188,7 +188,7 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
             instance.job_record.start()
 
             lock_manager = ContainerLockManager()
-            lmcv = bench_container_lock_manager.set(lock_manager)
+            lm_token = job_level_container_lock_manager.set(lock_manager)
 
             try:
                 result = wrapped(*args, **kwargs)
@@ -202,7 +202,7 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
                 instance.job_record.success(result)
             finally:
                 lock_manager.release_all()
-                bench_container_lock_manager.reset(lmcv)
+                job_level_container_lock_manager.reset(lm_token)
             return result
 
         agent_job_id = get_agent_job_id()
@@ -224,7 +224,7 @@ def job(name: str, priority="default", on_success=None, on_failure=None):
 
 def get_container_lock_manager():
     try:
-        return bench_container_lock_manager.get()
+        return job_level_container_lock_manager.get()
     except LookupError:
         # if called out of job context
         return None
