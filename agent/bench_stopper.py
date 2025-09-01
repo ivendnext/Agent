@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import docker
+import requests
 from filelock import FileLock, Timeout
 
 
@@ -16,6 +17,7 @@ class Config:
     min_uptime_hours: int = 3
     access_log_path: str = "/var/log/nginx"
     stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
+    cadvisor_endpoint: str = "http://127.0.0.1:9338/api/v1.3/docker"
 
 
 class BenchStopper:
@@ -25,7 +27,7 @@ class BenchStopper:
         self.running = False
         self.sleeping = False
         self.docker_client = None
-        self.mem_stats = {}
+        self.mem_stats = None
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -49,17 +51,73 @@ class BenchStopper:
 
         return self.docker_client
 
-    def _update_container_memory_usage(self, container):
-        """Get container memory usage statistics."""
+    def _get_container_current_memory(self, container):
         try:
             stats = container.stats(stream=False)
             memory_stats = stats.get('memory_stats', {})
-
-            if 'usage' in memory_stats:
-                self.mem_stats[container.name] = memory_stats['usage']
+            return memory_stats.get('usage')
         except Exception as e:
             self.log(f"Could not get memory stats for {container.name}: {e}")
 
+    def _get_cadvisor_memory_stats(self, container_id: str):
+        try:
+            # Get container stats from cAdvisor
+            response = requests.get( f"{Config.cadvisor_endpoint}/{container_id}", timeout=15)
+            if response.status_code != 200:
+                self.log(f"cAdvisor request failed with status {response.status_code}")
+                return None, None
+
+            data = response.json()
+            container_data = next(iter(data.values())) # assuming the 1st value in dict will be the cdata
+            if not container_data:
+                self.log(f"Data not found for {container_id} in cAdvisor data")
+                return None, None
+
+            stats = container_data.get('stats', [])
+
+            # Get the latest stats entry (should be the most recent)
+            latest_stat = stats[-1] if stats else None
+            if not latest_stat:
+                self.log(f"No stats found for container {container_id}")
+                return None, None
+
+            memory_stats = latest_stat.get('memory', {})
+            return memory_stats.get('usage'), memory_stats.get('max_usage')
+        except Exception as e:
+            self.log(f"Error fetching cAdvisor data for {container_id}: {e}")
+
+        return None, None
+
+    def _calculate_memory_average(self, container_name: str, current_memory: int, max_memory: int) -> int:
+        # Calculate average of current and max memory
+        session_average = (current_memory + max_memory) // 2
+
+        # Get previous average if it exists
+        if previous_average := self.mem_stats.get(container_name):
+            # Average the session average with the previous average
+            final_average = (session_average + previous_average) // 2
+        else:
+            # No previous data, use session average
+            final_average = session_average
+
+        return final_average
+
+    def _update_container_memory_usage(self, container):
+        """Get container memory usage statistics and update mem_stats."""
+        # Get both current and max memory usage from cAdvisor
+        current_memory, max_memory = self._get_cadvisor_memory_stats(container.id)
+
+        if not current_memory:
+            # fallback: Get current memory usage from container API
+            current_memory = self._get_container_current_memory(container)
+
+        if not current_memory:
+            return
+
+        # Calculate averaged memory usage
+        max_memory = max_memory or current_memory
+        averaged_memory = self._calculate_memory_average(container.name, current_memory, max_memory)
+        self.mem_stats[container.name] = averaged_memory
 
     def _find_log_files_for_bench(self, bench_name: str):
         """Find log files associated with a bench."""
@@ -162,16 +220,16 @@ class BenchStopper:
         return {}
 
     def _save_container_stats(self) -> None:
-        stats = self._load_existing_stats()
-        stats.update(self.mem_stats)
+        if not self.mem_stats:
+            return
 
         with FileLock("/tmp/mem_stats.lock"):
             with open(Config.stats_file, 'w') as f:
-                json.dump(stats, f, indent=2)
+                json.dump(self.mem_stats, f, indent=2)
                 f.flush()
 
         # clear any residue
-        self.mem_stats = {}
+        self.mem_stats = None
 
     def start(self) -> None:
         """Start the monitoring service."""
@@ -192,6 +250,9 @@ class BenchStopper:
                 self._init_docker_client()
 
                 running_containers = self.docker_client.containers.list()
+                if running_containers:
+                    self.mem_stats = self._load_existing_stats()
+
                 for container in running_containers:
                     if not self.running:
                         break
