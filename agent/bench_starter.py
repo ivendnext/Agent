@@ -5,13 +5,14 @@ This service monitors a Redis queue for bench start requests and starts containe
 in batches while respecting server memory limits and container memory requirements.
 """
 
+import sys
 import os
 import time
 import json
 import signal
 import psutil
 import datetime
-from filelock import FileLock
+from filelock import FileLock, Timeout
 
 import redis
 import docker
@@ -23,9 +24,9 @@ class Config:
     redis_port: int = Server().config["redis_port"]
     redis_queue_key: str = "bench_start_queue"
     redis_failed_hash_key: str = "bench_start_failed"
-    redis_failed_hash_expiry_mins: int = 15
+    redis_failed_hash_expiry_mins: int = 20
     check_interval_seconds: int = 60
-    memory_reserve_percent: float = 30.0  # Reserve 30% of system memory
+    memory_reserve_percent: float = 35.0  # Reserve 35% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
@@ -36,6 +37,7 @@ class BenchStarter:
         self.redis_client = None
         self.docker_client = None
         self.running = False
+        self.sleeping = False
         self._setup_signal_handlers()
 
     def _setup_signal_handlers(self):
@@ -47,6 +49,8 @@ class BenchStarter:
         """Handle shutdown signals."""
         self.log(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
+        if self.sleeping:
+            sys.exit(0)
 
     def _init_redis_client(self):
         try:
@@ -155,7 +159,7 @@ class BenchStarter:
 
     def _start_container(self, bench_name: str):
         try:
-            with FileLock(f"/tmp/{bench_name}.lock"):
+            with FileLock(f"/tmp/{bench_name}.lock", timeout=60):
                 container = self.docker_client.containers.get(bench_name)
                 if container.status in ("exited", "stopped"):
                     container.start()
@@ -164,6 +168,8 @@ class BenchStarter:
             return True
         except docker.errors.NotFound:
             self.log(f"Container {bench_name} not found")
+        except Timeout:
+            self.log(f"Could not acquire lock for {bench_name}, skipping")
         except Exception as e:
             self.log(f"Failed to start container {bench_name}: {e}")
 
@@ -193,8 +199,8 @@ class BenchStarter:
         except Exception as e:
             self.log(f"Error removing {bench_name} from start queue: {e}")
 
-    def _move_to_failed_queue(self, bench_name: str, reason: str):
-        """Atomically remove bench from queue and add to failed queue."""
+    def _remove_and_add_failed_status(self, bench_name: str, reason: str):
+        """Atomically remove bench from start queue and add failed status."""
         try:
             with self.redis_client.pipeline() as pipe:
                 pipe.multi()
@@ -239,7 +245,7 @@ class BenchStarter:
 
                 reason = "Failed to start container. Please try to queue again and/or contact support."
 
-            self._move_to_failed_queue(bench_name, reason)
+            self._remove_and_add_failed_status(bench_name, reason)
             self.log(f"Cannot start {bench_name}: {reason}")
 
     def start(self):
@@ -249,9 +255,11 @@ class BenchStarter:
 
         while self.running:
             try:
+                self.sleeping = True
                 time.sleep(Config.check_interval_seconds)
-                self.log("Starting Bench Container Starter")
+                self.sleeping = False
 
+                self.log("Starting Bench Container Starter")
                 self._init_redis_client()
                 self._init_docker_client()
 
