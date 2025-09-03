@@ -537,7 +537,7 @@ class Bench(Base):
             "code_server": codeserver,
             "for_devbox": self.for_devbox,
             "ivend_codeserver_port": self.bench_config["codeserver_port"], #TODO: change this
-            "sleepy_containers": self.server.allow_sleepy_containers,
+            "allow_sleepy_containers": self.server.allow_sleepy_containers,
             "agent_port": self.server.config["web_port"],
         }
         nginx_config = os.path.join(self.directory, "nginx.conf")
@@ -809,14 +809,18 @@ class Bench(Base):
             self._stop()
             self._update_runtime_limits(memory_high, memory_max, memory_swap, vcpu)
             if should_start:
-                self._start()
+                if self.server.allow_sleepy_containers:
+                    from agent.bench_starter import BenchStarter
 
-        # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
+                    BenchStarter().request_start(self.name)
+                else:
+                    self._start()
+
         if self.server.allow_sleepy_containers:
             with get_container_lock_manager().acquire(self.name):
-                # TODO: queue the request to start the container (if the container was running)
-                # ref: https://github.com/ivendnext/Agent/pull/5#discussion_r2296589691
-                _update_limits(False)
+                # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
+                # queue the request to start the container (if the container was running)
+                _update_limits(self.server.is_container_running())
         else:
            _update_limits(True)
 

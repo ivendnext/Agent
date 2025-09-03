@@ -24,7 +24,7 @@ class Config:
     redis_port: int = Server().config["redis_port"]
     redis_queue_key: str = "bench_start_queue"
     redis_failed_hash_key: str = "bench_start_failed"
-    redis_failed_hash_expiry_mins: int = 20
+    redis_failed_hash_expiry_mins: int = 12
     check_interval_seconds: int = 60
     memory_reserve_percent: float = 35.0  # Reserve 35% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
@@ -38,7 +38,20 @@ class BenchStarter:
         self.docker_client = None
         self.running = False
         self.sleeping = False
-        self._setup_signal_handlers()
+
+    def request_start(self, bench_name: str, ignore_throttle: bool=False):
+        if not self.redis_client:
+            self._init_redis_client()
+
+        status = "REQUEST_ALREADY_EXISTS"
+        queue_items = self.redis_client.lrange(Config.redis_queue_key, 0, -1)
+        if bench_name not in queue_items:
+            status = "THROTTLED"
+            if ignore_throttle or not self.redis_client.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "throttle"):
+                self.redis_client.rpush(Config.redis_queue_key, bench_name)
+                status = "QUEUED"
+
+        return status
 
     def _setup_signal_handlers(self):
         """Setup graceful shutdown handlers."""
@@ -199,7 +212,7 @@ class BenchStarter:
         except Exception as e:
             self.log(f"Error removing {bench_name} from start queue: {e}")
 
-    def _remove_and_add_failed_status(self, bench_name: str, reason: str):
+    def _remove_and_add_failed_status(self, bench_name: str, info: str, throttle: bool=False):
         """Atomically remove bench from start queue and add failed status."""
         try:
             with self.redis_client.pipeline() as pipe:
@@ -208,7 +221,7 @@ class BenchStarter:
                 self._remove_from_queue(bench_name, pipe)
 
                 failed_key = f"{Config.redis_failed_hash_key}:{bench_name}"
-                pipe.hset(failed_key, mapping={'reason': reason})
+                pipe.hset(failed_key, mapping={'info': info, 'throttle': throttle})
                 pipe.expire(failed_key, Config.redis_failed_hash_expiry_mins * 60) # set expiry
 
                 # Execute all commands atomically
@@ -234,8 +247,9 @@ class BenchStarter:
             self.log(f"Processing {bench_name}")
             required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
 
+            throttle = True
             # Check if we can start this bench
-            can_start, reason = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)
+            can_start, info = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)
             if can_start:
                 if self._start_container(bench_name):
                     # reduce the available memory
@@ -243,16 +257,19 @@ class BenchStarter:
                     self._remove_from_queue(bench_name)
                     continue
 
-                reason = "Failed to start container. Please try to queue again and/or contact support."
+                # dont throttle for non-memory related stuff
+                throttle = False
+                info = "Please try to queue again and/or contact support."
 
-            self._remove_and_add_failed_status(bench_name, reason)
-            self.log(f"Cannot start {bench_name}: {reason}")
+            self._remove_and_add_failed_status(bench_name, info, throttle)
+            self.log(f"Cannot start {bench_name}: {info}")
 
     def start(self):
         """Start the bench starter service."""
+        self._setup_signal_handlers()
+
         retries = 3
         self.running = True
-
         while self.running:
             try:
                 self.sleeping = True
