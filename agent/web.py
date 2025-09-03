@@ -38,7 +38,7 @@ from agent.proxysql import ProxySQL
 from agent.security import Security
 from agent.server import Server
 from agent.ssh import SSHProxy
-from agent.bench_starter import Config
+from agent.bench_starter import Config, BenchStarter
 
 from agent.utils import check_installed_pyspy
 
@@ -1766,11 +1766,10 @@ def destroy_devbox(devbox_name: str):
     return {"job": job}
 
 
-@application.route('/bench-start/', defaults={'bench_name': None})
 @application.route("/bench-start/<string:bench_name>")
 @skip_auth
 def bench_start(bench_name):
-    if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
+    if not bench_name:
         return {"message": "No Bench Provided."}, 400
 
     try:
@@ -1785,23 +1784,21 @@ def bench_start(bench_name):
     if container.status in ("running", "restarting"):
         message = "Bench is already running or restarting."
     else:
-        redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
-        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
-        if bench_name not in queue_items:
-            # Add to the end of the queue (FIFO)
-            redis_instance.rpush(Config.redis_queue_key, bench_name)
-            message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 202
-        else:
+        req_status = BenchStarter().request_start(bench_name)
+        if req_status == "REQUEST_ALREADY_EXISTS":
             message = "Request for the bench to start is already enqueued."
+        elif req_status == "THROTTLED":
+            message, status = "A request for bench-start failed recently. Please try again after some time.", 429
+        else:
+            message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 202
 
     return {"message": message}, status
 
 
-@application.route('/bench-status/', defaults={'bench_name': None})
 @application.route("/bench-status/<string:bench_name>")
 @skip_auth
 def bench_status(bench_name):
-    if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
+    if not bench_name:
         return {"message": "No Bench Provided."}, 400
 
     try:
@@ -1820,8 +1817,8 @@ def bench_status(bench_name):
             return {"message": "Request for the bench to start is enqueued."}, status
 
         # Check in failed hash
-        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "reason")
+        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "info")
         if failed_info:
-            message = f"Bench failed to start. Reason: {failed_info}."
+            message = f"Bench failed to start. {failed_info}."
 
     return {"message": message}, status
