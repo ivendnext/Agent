@@ -21,15 +21,19 @@ from agent.bench import Bench
 
 
 class Config:
-    redis_port: int = Server().config["redis_port"]
     redis_queue_key: str = "bench_start_queue"
     redis_failed_hash_key: str = "bench_start_failed"
-    redis_failed_hash_expiry_mins: int = 12
+    redis_failed_hash_expiry_mins: int = 10
     check_interval_seconds: int = 60
-    memory_reserve_percent: float = 35.0  # Reserve 35% of system memory
+    memory_reserve_percent: float = 30.0  # Reserve 30% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
+    nginx_log_dir: str = "/var/log/nginx"
+    activity_threshold_hours: float = 1.0  # Consider container active if accessed within 1 hour
+    prediction_adjustment_factor: float = 0.7  # How much of the prediction error to reserve
+    available_memory_adjustment_percent: float = 20.0  # Max 20% of available memory for adjustments
+
 
 
 class BenchStarter:
@@ -68,7 +72,7 @@ class BenchStarter:
     def _init_redis_client(self):
         try:
             self.redis_client = redis.Redis(
-                port=Config.redis_port,
+                port=Server().config["redis_port"],
                 decode_responses=True
             )
         except Exception as e:
@@ -101,12 +105,10 @@ class BenchStarter:
             'available_effective_bytes': available_effective_memory,
         }
 
-    def _get_memory_threshold_bytes(self, memory_info):
+    def _get_memory_threshold(self):
         # Use effective memory (RAM + swap) for threshold calculation
-        total_effective_memory = memory_info['total_effective_bytes']
-        # We want to maintain at least 25% of total memory as available
-        min_available_threshold = int(total_effective_memory * (Config.memory_reserve_percent / 100))
-        return min_available_threshold
+        total_effective_memory = self._get_system_memory_info()['total_effective_bytes']
+        return int(total_effective_memory * (Config.memory_reserve_percent / 100))
 
     def _load_memory_stats(self):
         """Load memory stats from the stats file."""
@@ -126,6 +128,55 @@ class BenchStarter:
         except Exception as e:
             self.log(f"Could not load config for bench {bench_name}: {e}")
         return {}
+
+    def _calculate_predictive_memory_adjustment(self, bench_name: str) -> int:
+        """Calculate memory adjustment based on prediction accuracy and activity."""
+        try:
+            # Check if container is currently active
+            if not self._is_container_active(bench_name):
+                self.log(f"{bench_name} inactive (no recent web activity), skipping adjustment")
+                return 0
+
+            # Get current memory usage of the container if it's running
+            current_usage = self._get_current_container_memory(bench_name)
+            if current_usage <= 0:
+                # Container not running or can't get stats
+                return 0
+
+            rolling_avg = self.container_mem_stats[bench_name]
+
+            # Calculate underestimation (how much more memory container uses than current)
+            underestimation = max(0, rolling_avg - current_usage)
+            if underestimation > 0:
+                # Apply adjustment factor to be conservative but not overly so
+                adjustment = int(underestimation * Config.prediction_adjustment_factor)
+                self.log(f"Predictive adjustment for {bench_name}: {adjustment/(1024*1024):.1f}MB " +
+                        f"(rolling_avg: {rolling_avg/(1024*1024):.1f}MB, current: {current_usage/(1024*1024):.1f}MB)")
+                return adjustment
+
+        except Exception as e:
+            self.log(f"Error calculating predictive adjustment for {bench_name}: {e}")
+
+        return 0
+
+    def _get_adjusted_available_memory(self) -> int:
+        """Adjust available memory based on historical data of running containers."""
+
+        total_adjustment = 0
+        for bench in self.docker_client.containers.list():
+            if bench.name not in self.container_mem_stats:
+                continue  # No historical data to work with
+
+            adjustment = self._calculate_predictive_memory_adjustment(bench.name)
+            total_adjustment += adjustment
+
+        available_memory = self._get_system_memory_info()["available_effective_bytes"]
+        max_adjustment = int(available_memory * (Config.available_memory_adjustment_percent / 100))
+
+        if total_adjustment >= max_adjustment:
+            total_adjustment = max_adjustment
+
+        return available_memory - total_adjustment
 
     def _calculate_bench_memory_requirement(self, bench_name: str):
         # First try to get from memory stats file
@@ -156,9 +207,6 @@ class BenchStarter:
         return Config.worker_memory_mb * total_workers * 1024 * 1024
 
     def _can_start_bench(self, available_memory: int, min_available_threshold: int, required_memory_by_bench: int):
-        """Check if there's enough memory to start a bench."""
-        # TODO: we could add a slack - like say if it's upto 100mb/3% above then let the bench start (?)
-
         # Check if current available memory is already below threshold
         if available_memory < min_available_threshold:
             return False, "Available memory below minimum threshold"
@@ -230,15 +278,14 @@ class BenchStarter:
             self.log(f"Error moving {bench_name} to failed queue: {e}")
 
     def _process_batch(self):
-        # Get current memory state
-        memory_info = self._get_system_memory_info()
-        min_available_threshold = self._get_memory_threshold_bytes(memory_info)
-        available_memory = memory_info["available_effective_bytes"]
-
         # Get pending benches from main queue
         pending_benches = self._get_pending_benches()
         if pending_benches:
             self.container_mem_stats = self._load_memory_stats()
+
+            # Get memory state
+            min_available_threshold = self._get_memory_threshold()
+            available_memory = self._get_adjusted_available_memory()
 
         for bench_name in pending_benches:
             if not self.running:
