@@ -73,10 +73,9 @@ def ping_server(password: str):
 @click.option("--workers", required=True, type=int)
 @click.option("--proxy-ip", required=False, type=str, default=None)
 @click.option("--sentry-dsn", required=False, type=str)
-@click.option("--is_devbox_proxy", required=False, type=str, default=False)
 @click.option("--allow-sleepy-containers", is_flag=True)
 @click.option("--press-url", required=False, type=str)
-def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=None, allow_sleepy_containers=False, press_url=None):
+def config(name, user, workers, proxy_ip=None, sentry_dsn=None, allow_sleepy_containers=False, press_url=None):
     config = {
         "benches_directory": f"/home/{user}/benches",
         "devboxes_directory": f"/home/{user}/devboxes",
@@ -97,8 +96,6 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, is_devbox_proxy=
         config["proxy_ip"] = proxy_ip
     if sentry_dsn:
         config["sentry_dsn"] = sentry_dsn
-    if is_devbox_proxy:
-        config["is_devbox_proxy"] = is_devbox_proxy
 
     with open("config.json", "w") as f:
         json.dump(config, f, sort_keys=True, indent=4)

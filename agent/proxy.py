@@ -39,8 +39,6 @@ class Proxy(Server):
         self.hosts_directory = os.path.join(self.nginx_directory, "hosts")
         self.error_pages_directory = os.path.join(self.directory, "repo", "agent", "pages")
 
-        self.is_devbox_proxy = self.config.get("is_devbox_proxy")
-
         self._proxy_config_modification_lock = None
         self.job = None
         self.step = None
@@ -321,7 +319,6 @@ class Proxy(Server):
                 "nginx_directory": config["nginx_directory"],
                 "error_pages_directory": self.error_pages_directory,
                 "tls_protocols": config.get("tls_protocols"),
-                "is_devbox_proxy": self.is_devbox_proxy or False,
             }
 
         self._render_template(
