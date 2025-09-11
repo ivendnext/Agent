@@ -1788,18 +1788,18 @@ def bench_start(bench_name):
                 Please try again later or contact support if the issue persists."""
         ), 500
 
-    status = 200
-    if container.status in ("running", "restarting"):
-        title = "Bench Status"
-        message = "Bench is already running or restarting."
-    else:
+    title = "Bench Status"
+    message, status = "Bench is already running or restarting.", 200
+
+    if container.status not in ("running", "restarting"):
         title = "Request Status"
         req_status = BenchStarter().request_start(bench_name)
         if req_status == "REQUEST_ALREADY_EXISTS":
             message = "Request for the bench to start is already enqueued."
         elif req_status == "THROTTLED":
-            message, status = "A request for bench-start failed recently. Please try again after some time.", 429
-            title = "Request Throttled"
+            # TODO: adding 429 status leads to daily usage limit exceeded template being rendered
+            message = "A request for bench-start failed recently. Please try again after some time."
+            title = "Throttled"
         else:
             message, status = "Request Queued. It may take a few minutes to start things. \nYou can check the status at /bench-status.", 202
 
@@ -1822,7 +1822,7 @@ def bench_status(bench_name):
         ), 500
 
     title = "Bench Status"
-    message, status = f"Bench status: {container.status}.", 200
+    message, status = container.status.capitalize(), 200
 
     if container.status in ("exited", "stopped"):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
