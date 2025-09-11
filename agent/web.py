@@ -12,7 +12,7 @@ from base64 import b64decode
 from functools import wraps
 from typing import TYPE_CHECKING
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, render_template
 from passlib.hash import pbkdf2_sha256 as pbkdf2
 from playhouse.shortcuts import model_to_dict
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -38,7 +38,7 @@ from agent.proxysql import ProxySQL
 from agent.security import Security
 from agent.server import Server
 from agent.ssh import SSHProxy
-from agent.bench_starter import Config
+from agent.bench_starter import Config, BenchStarter
 
 from agent.utils import check_installed_pyspy
 
@@ -1766,62 +1766,72 @@ def destroy_devbox(devbox_name: str):
     return {"job": job}
 
 
-@application.route('/bench-start/', defaults={'bench_name': None})
 @application.route("/bench-start/<string:bench_name>")
 @skip_auth
 def bench_start(bench_name):
-    if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
-        return {"message": "No Bench Provided."}, 400
-
     try:
         client = docker.from_env()
         container = client.containers.get(bench_name)
     except docker.errors.NotFound:
-        return {"message": "No Bench found for the site."}, 404
-    except docker.errors.APIError as e:
-        return {"message": "Internal Service Error."}, 500
+        return render_template("web/web.html", title="Error", message="No Bench found for the site."), 404
+    except Exception as e:
+        return render_template(
+            "web/web.html",
+            title="Error",
+            message="""An unexpected error occurred while communicating with the Docker service.\n
+                Please try again later or contact support if the issue persists."""
+        ), 500
 
     status = 200
     if container.status in ("running", "restarting"):
+        title = "Bench Status"
         message = "Bench is already running or restarting."
     else:
-        redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
-        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
-        if bench_name not in queue_items:
-            # Add to the end of the queue (FIFO)
-            redis_instance.rpush(Config.redis_queue_key, bench_name)
-            message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status/.", 202
-        else:
+        title = "Request Status"
+        req_status = BenchStarter().request_start(bench_name)
+        if req_status == "REQUEST_ALREADY_EXISTS":
             message = "Request for the bench to start is already enqueued."
+        elif req_status == "THROTTLED":
+            message, status = "A request for bench-start failed recently. Please try again after some time.", 429
+            title = "Request Throttled"
+        else:
+            message, status = "Request Queued. It may take a few minutes to start things. \nYou can check the status at /bench-status.", 202
 
-    return {"message": message}, status
+    return render_template("web/web.html", title=title, message=message), status
 
-
-@application.route('/bench-status/', defaults={'bench_name': None})
 @application.route("/bench-status/<string:bench_name>")
 @skip_auth
 def bench_status(bench_name):
-    if not (bench_name or (bench_name := request.headers.get("X-BENCH-NAME", None))):
-        return {"message": "No Bench Provided."}, 400
-
     try:
         client = docker.from_env()
         container = client.containers.get(bench_name)
     except docker.errors.NotFound:
-        return {"message": "No Bench found for the site."}, 404
-    except docker.errors.APIError as e:
-        return {"message": "Internal Service Error"}, 500
+        return render_template("web/web.html", title="Error", message="No Bench found for the site."), 404
+    except Exception as e:
+        return render_template(
+            "web/web.html",
+            title="Error",
+            message="""An unexpected error occurred while communicating with the Docker service.\n
+                Please try again later or contact support if the issue persists."""
+        ), 500
 
+    title = "Bench Status"
     message, status = f"Bench status: {container.status}.", 200
+
     if container.status in ("exited", "stopped"):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
         queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
         if bench_name in queue_items:
-            return {"message": "Request for the bench to start is enqueued."}, status
+            return (
+                render_template(
+                    "web/web.html", title=title, message=(message + "\nRequest for the bench to start is enqueued.")
+                ),
+                status
+            )
 
         # Check in failed hash
-        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "reason")
+        failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "info")
         if failed_info:
-            message = f"Bench failed to start. Reason: {failed_info}."
+            message = message + "\nBench failed to start." + f" {failed_info}."
 
-    return {"message": message}, status
+    return render_template("web/web.html", title=title, message=message), status
