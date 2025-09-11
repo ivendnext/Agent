@@ -2,7 +2,7 @@
 <html lang="en">
     <head>
         <meta charset="utf-8">
-        <title>{{ title }}</title>
+        <title>iVendNext Cloud</title>
         <style>
             html {
                 -webkit-font-smoothing: antialiased;
@@ -112,7 +112,7 @@
                     {{ title }}
                 </h1>
                 <p class="message">
-                    {{ message }}
+                    {{ message.replace('\n', '<br>')|safe }}
                 </p>
             </div>
         </div>

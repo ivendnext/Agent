@@ -1769,16 +1769,18 @@ def destroy_devbox(devbox_name: str):
 @application.route("/bench-start/<string:bench_name>")
 @skip_auth
 def bench_start(bench_name):
-    if not bench_name:
-        return render_template("web/web.html", title="Error", message="No Bench Provided."), 400
-
     try:
         client = docker.from_env()
         container = client.containers.get(bench_name)
     except docker.errors.NotFound:
         return render_template("web/web.html", title="Error", message="No Bench found for the site."), 404
-    except docker.errors.APIError as e:
-        return render_template("web/web.html", title="Error", message="Internal Service Error."), 500
+    except Exception as e:
+        return render_template(
+            "web/web.html",
+            title="Error",
+            message="""An unexpected error occurred while communicating with the Docker service.\n
+                Please try again later or contact support if the issue persists."""
+        ), 500
 
     status = 200
     if container.status in ("running", "restarting"):
@@ -1793,23 +1795,25 @@ def bench_start(bench_name):
             message, status = "A request for bench-start failed recently. Please try again after some time.", 429
             title = "Request Throttled"
         else:
-            message, status = "Request Queued. It may take a few minutes to start things. You can check the status at /bench-status.", 202
+            message, status = "Request Queued. It may take a few minutes to start things. \nYou can check the status at /bench-status.", 202
 
     return render_template("web/web.html", title=title, message=message), status
 
 @application.route("/bench-status/<string:bench_name>")
 @skip_auth
 def bench_status(bench_name):
-    if not bench_name:
-        return render_template("web/web.html", title="Error", message="No Bench Provided."), 400
-
     try:
         client = docker.from_env()
         container = client.containers.get(bench_name)
     except docker.errors.NotFound:
         return render_template("web/web.html", title="Error", message="No Bench found for the site."), 404
-    except docker.errors.APIError as e:
-        return render_template("web/web.html", title="Error", message="Internal Service Error"), 500
+    except Exception as e:
+        return render_template(
+            "web/web.html",
+            title="Error",
+            message="""An unexpected error occurred while communicating with the Docker service.\n
+                Please try again later or contact support if the issue persists."""
+        ), 500
 
     title = "Bench Status"
     message, status = f"Bench status: {container.status}.", 200
@@ -1820,7 +1824,7 @@ def bench_status(bench_name):
         if bench_name in queue_items:
             return (
                 render_template(
-                    "web/web.html", title="Request Status", message="Request for the bench to start is enqueued."
+                    "web/web.html", title=title, message=(message + "\nRequest for the bench to start is enqueued.")
                 ),
                 status
             )
@@ -1828,6 +1832,6 @@ def bench_status(bench_name):
         # Check in failed hash
         failed_info = redis_instance.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "info")
         if failed_info:
-            message = f"Bench failed to start. {failed_info}."
+            message = message + "\nBench failed to start." + f" {failed_info}."
 
     return render_template("web/web.html", title=title, message=message), status
