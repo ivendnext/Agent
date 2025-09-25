@@ -1793,7 +1793,7 @@ def bench_start(bench_name):
 
     if container.status not in ("running", "restarting"):
         title = "Request Status"
-        req_status = BenchStarter().request_start(bench_name)
+        req_status = BenchStarter().queue_request(bench_name)
         if req_status == "REQUEST_ALREADY_EXISTS":
             message = "Request for the bench to start is already enqueued."
         elif req_status == "THROTTLED":

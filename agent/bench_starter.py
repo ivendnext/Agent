@@ -25,13 +25,12 @@ class Config:
     redis_failed_hash_key: str = "bench_start_failed"
     redis_failed_hash_expiry_mins: int = 10
     check_interval_seconds: int = 60
-    memory_reserve_percent: float = 30.0  # Reserve 30% of system memory
+    memory_reserve_percent: float = 35.0  # Reserve 35% of system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
     nginx_log_dir: str = "/var/log/nginx"
     activity_threshold_hours: float = 1.0  # Consider container active if accessed within 1 hour
-    prediction_adjustment_factor: float = 0.7  # How much of the prediction error to reserve
     available_memory_adjustment_percent: float = 20.0  # Max 20% of available memory for adjustments
 
 
@@ -43,10 +42,11 @@ class BenchStarter:
         self.running = False
         self.sleeping = False
 
-    def request_start(self, bench_name: str, ignore_throttle: bool=False):
+    def queue_request(self, bench_name: str, ignore_throttle: bool=False):
         if not self.redis_client:
             self._init_redis_client()
 
+        # TODO: add an enum for status
         status = "REQUEST_ALREADY_EXISTS"
         queue_items = self.redis_client.lrange(Config.redis_queue_key, 0, -1)
         if bench_name not in queue_items:
@@ -132,7 +132,7 @@ class BenchStarter:
     def _calculate_predictive_memory_adjustment(self, bench_name: str) -> int:
         """Calculate memory adjustment based on prediction accuracy and activity."""
         try:
-            # Check if container is currently active
+            # Check if container is active
             if not self._is_container_active(bench_name):
                 self.log(f"{bench_name} inactive (no recent web activity), skipping adjustment")
                 return 0
@@ -143,16 +143,10 @@ class BenchStarter:
                 # Container not running or can't get stats
                 return 0
 
-            rolling_avg = self.container_mem_stats[bench_name]
+            avg = self.container_mem_stats[bench_name]
 
-            # Calculate underestimation (how much more memory container uses than current)
-            underestimation = max(0, rolling_avg - current_usage)
-            if underestimation > 0:
-                # Apply adjustment factor to be conservative but not overly so
-                adjustment = int(underestimation * Config.prediction_adjustment_factor)
-                self.log(f"Predictive adjustment for {bench_name}: {adjustment/(1024*1024):.1f}MB " +
-                        f"(rolling_avg: {rolling_avg/(1024*1024):.1f}MB, current: {current_usage/(1024*1024):.1f}MB)")
-                return adjustment
+            # underestimation (how much more memory container uses than current)
+            return max(0, avg - current_usage)
 
         except Exception as e:
             self.log(f"Error calculating predictive adjustment for {bench_name}: {e}")
@@ -167,12 +161,10 @@ class BenchStarter:
             if bench.name not in self.container_mem_stats:
                 continue  # No historical data to work with
 
-            adjustment = self._calculate_predictive_memory_adjustment(bench.name)
-            total_adjustment += adjustment
+            total_adjustment += self._calculate_predictive_memory_adjustment(bench.name)
 
         available_memory = self._get_system_memory_info()["available_effective_bytes"]
         max_adjustment = int(available_memory * (Config.available_memory_adjustment_percent / 100))
-
         if total_adjustment >= max_adjustment:
             total_adjustment = max_adjustment
 
@@ -269,7 +261,7 @@ class BenchStarter:
                 self._remove_from_queue(bench_name, pipe)
 
                 failed_key = f"{Config.redis_failed_hash_key}:{bench_name}"
-                pipe.hset(failed_key, mapping={'info': info, 'throttle': throttle})
+                pipe.hset(failed_key, mapping={'info': info, 'throttle': int(throttle)})
                 pipe.expire(failed_key, Config.redis_failed_hash_expiry_mins * 60) # set expiry
 
                 # Execute all commands atomically
@@ -324,18 +316,18 @@ class BenchStarter:
                 self.sleeping = False
 
                 self.log("Starting Bench Container Starter")
+
                 self._init_redis_client()
                 self._init_docker_client()
-
                 self._process_batch()
+
                 retries = 3
             except Exception as e:
                 self.log(f"Unexpected error: {e}")
-                time.sleep(60)  # Wait a minute before retrying
 
                 retries -= 1
                 if retries < 0:
-                    self.log("Unable to recover")
+                    self.log("Unable to recover - Exiting")
                     break
 
         self.log("Bench Starter stopped")
