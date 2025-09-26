@@ -756,9 +756,9 @@ class Bench(Base):
 
             bench_directory = "/home/frappe/frappe-bench"
             mounts = self.prepare_mounts_on_host(bench_directory)
-            if self.for_devbox:
-                # to ensure app changes dont just vanish
-                mounts += f"-v {self.apps_directory}:{bench_directory}/apps "
+            # if self.for_devbox:
+            #     # to ensure app changes dont just vanish
+            #     mounts += f"-v {self.apps_directory}:{bench_directory}/apps "
 
             command = (
                 "docker run -d --init -u frappe "
