@@ -1727,6 +1727,12 @@ def new_devbox():
     return {"job": job}
 
 
+@application.route("/license/check-entitlements", methods=["POST"])
+def check_entitlements():
+    job = Server().check_license_entitlements()
+    return {"job": job}
+
+
 @application.route("/devboxes/<string:devbox_name>/start", methods=["POST"])
 def start_devbox(devbox_name: str):
     data = request.json

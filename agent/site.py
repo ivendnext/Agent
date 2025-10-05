@@ -49,8 +49,8 @@ class Site(Base):
         self.password = self.config["db_password"]
         self.host = self.config.get("db_host", self.bench.host)
 
-    def bench_execute(self, command, input=None):
-        return self.bench.docker_execute(f"bench --site {self.name} {command}", input=input)
+    def bench_execute(self, command, input=None, non_zero_throw=True):
+        return self.bench.docker_execute(f"bench --site {self.name} {command}", input=input, non_zero_throw=non_zero_throw)
 
     def dump(self):
         return {"name": self.name}
@@ -842,6 +842,22 @@ print(">>>" + frappe.session.sid + "<<<")
             backup["url"] = f"https://{self.name}/backups/{file}"
 
         return backups
+
+    def check_license_entitlements(self):
+        try:
+            output = self.bench_execute("execute frappe.model.document.get_limits", non_zero_throw=False)
+            if output["returncode"] != 0:
+                raise Exception(output["output"][-150:])
+
+            exceeded = {}
+            entitlements = json.loads(output["output"])
+            for e, v in entitlements.items():
+                if isinstance(v, dict):
+                    if int(v["allowed_quota"]) < int(v["current_usage"]):
+                        exceeded[e] = {"allowed": v["allowed_quota"], "current": v["current_usage"]}
+            return exceeded
+        except Exception as e:
+            return {"error": str(e)}
 
     def get_usage(self):
         """Returns Usage in bytes"""

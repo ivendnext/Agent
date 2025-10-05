@@ -954,6 +954,20 @@ class Server(Base):
 
         return available_ports
 
+    @job("Check License Entitlements")
+    def check_license_entitlements(self):
+        return self._check_license_entitlements()
+
+    @step("Check License Entitlements")
+    def _check_license_entitlements(self):
+        violations_and_errors = {}
+        for bench in self.benches.values():
+            for site in bench.sites.values():
+                if violations_or_error := site.check_license_entitlements():
+                    violations_and_errors[site.name] = violations_or_error
+
+        return violations_and_errors
+
     @step("Initialize Devbox")
     def devbox_init(self, devbox_name):
         devboxes_directory = os.path.join(self.devboxes_directory, devbox_name)
