@@ -226,7 +226,6 @@ class BenchStopper:
         with FileLock("/tmp/mem_stats.lock"):
             with open(Config.stats_file, 'w') as f:
                 json.dump(self.mem_stats, f, indent=2)
-                f.flush()
 
         # clear any residue
         self.mem_stats = None
@@ -263,7 +262,6 @@ class BenchStopper:
                 retries = 3
             except Exception as e:
                 self.log(f"Unexpected error in main loop: {e}")
-                time.sleep(60)
 
                 retries -= 1
                 if retries <= 0:
