@@ -852,7 +852,7 @@ print(">>>" + frappe.session.sid + "<<<")
             exceeded = {}
             entitlements = json.loads(output["output"])
             for e, v in entitlements.items():
-                if isinstance(v, dict):
+                if e != "_info":
                     if int(v["allowed_quota"]) < int(v["current_usage"]):
                         exceeded[e] = {"allowed": v["allowed_quota"], "current": v["current_usage"]}
             return exceeded
