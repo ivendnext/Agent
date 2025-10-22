@@ -845,7 +845,7 @@ print(">>>" + frappe.session.sid + "<<<")
 
     def check_license_entitlements(self):
         try:
-            output = self.bench_execute("execute frappe.model.document.get_limits", non_zero_throw=False)
+            output = self.bench_execute("execute frappe.utils.license.get_entitlements", non_zero_throw=False)
             if output["returncode"] != 0:
                 raise Exception(output["output"][-150:])
 
