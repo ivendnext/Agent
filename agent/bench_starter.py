@@ -1,10 +1,3 @@
-"""
-Bench Container Starter
-
-This service monitors a Redis queue for bench start requests and starts containers
-in batches while respecting server memory limits and container memory requirements.
-"""
-
 import sys
 import os
 import time
@@ -18,6 +11,7 @@ import redis
 import docker
 from agent.server import Server
 from agent.bench import Bench
+from agent.bench_stopper import HelperMixin
 
 
 class Config:
@@ -29,20 +23,20 @@ class Config:
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
-    nginx_log_dir: str = "/var/log/nginx"
-    activity_threshold_hours: float = 1.0  # Consider container active if accessed within 1 hour
+    activity_threshold_hours: float = 0.5  # Consider container active if accessed within last 30 mins (for mem adjustment)
+    min_uptime_hours: float = 0.5 # Container must be up for at least 30 mins to be considered for mem adjustment
     available_memory_adjustment_percent: float = 20.0  # Max 20% of available memory for adjustments
 
 
 
-class BenchStarter:
+class BenchStarter(HelperMixin):
     def __init__(self):
         self.redis_client = None
         self.docker_client = None
         self.running = False
         self.sleeping = False
 
-    def queue_request(self, bench_name: str, ignore_throttle: bool=False):
+    def queue_request(self, bench_name, ignore_throttle=False):
         if not self.redis_client:
             self._init_redis_client()
 
@@ -121,7 +115,7 @@ class BenchStarter:
             self.log(f"Could not load memory stats file: {e}")
         return {}
 
-    def _load_bench_config(self, bench_name: str):
+    def _load_bench_config(self, bench_name):
         """Load bench configuration from config.json."""
         try:
             return Bench(bench_name, Server()).bench_config
@@ -129,17 +123,17 @@ class BenchStarter:
             self.log(f"Could not load config for bench {bench_name}: {e}")
         return {}
 
-    def _calculate_predictive_memory_adjustment(self, bench_name: str) -> int:
-        """Calculate memory adjustment based on prediction accuracy and activity."""
+    def _calculate_memory_adjustment(self, bench_name):
+        """Calculate memory adjustment based on activity."""
         try:
             # Check if container is active
-            if not self._is_container_active(bench_name):
+            if not self._is_container_active(bench_name, Config.min_uptime_hours, Config.activity_threshold_hours):
                 self.log(f"{bench_name} inactive (no recent web activity), skipping adjustment")
                 return 0
 
             # Get current memory usage of the container if it's running
             current_usage = self._get_current_container_memory(bench_name)
-            if current_usage <= 0:
+            if not current_usage or current_usage <= 0:
                 # Container not running or can't get stats
                 return 0
 
@@ -153,7 +147,7 @@ class BenchStarter:
 
         return 0
 
-    def _get_adjusted_available_memory(self) -> int:
+    def _get_adjusted_available_memory(self):
         """Adjust available memory based on historical data of running containers."""
 
         total_adjustment = 0
@@ -161,7 +155,7 @@ class BenchStarter:
             if bench.name not in self.container_mem_stats:
                 continue  # No historical data to work with
 
-            total_adjustment += self._calculate_predictive_memory_adjustment(bench.name)
+            total_adjustment += self._calculate_memory_adjustment(bench.name)
 
         available_memory = self._get_system_memory_info()["available_effective_bytes"]
         max_adjustment = int(available_memory * (Config.available_memory_adjustment_percent / 100))
@@ -170,7 +164,7 @@ class BenchStarter:
 
         return available_memory - total_adjustment
 
-    def _calculate_bench_memory_requirement(self, bench_name: str):
+    def _calculate_bench_memory_requirement(self, bench_name):
         # First try to get from memory stats file
         if bench_name in self.container_mem_stats:
             mem_stat = self.container_mem_stats[bench_name]
@@ -198,7 +192,7 @@ class BenchStarter:
         total_workers = gunicorn_workers + total_bg_workers
         return Config.worker_memory_mb * total_workers * 1024 * 1024
 
-    def _can_start_bench(self, available_memory: int, min_available_threshold: int, required_memory_by_bench: int):
+    def _can_start_bench(self, available_memory, min_available_threshold, required_memory_by_bench):
         # Check if current available memory is already below threshold
         if available_memory < min_available_threshold:
             return False, "Available memory below minimum threshold"
@@ -210,7 +204,7 @@ class BenchStarter:
 
         return True, ""
 
-    def _start_container(self, bench_name: str):
+    def _start_container(self, bench_name):
         try:
             with FileLock(f"/tmp/{bench_name}.lock", timeout=60):
                 container = self.docker_client.containers.get(bench_name)
@@ -244,15 +238,15 @@ class BenchStarter:
 
         return []
 
-    def _remove_from_queue(self, bench_name: str, pipe=None):
-        """Remove bench from the Redis queue after successful start."""
+    def _remove_from_queue(self, bench_name, pipe=None):
+        """Remove bench from the Redis queue."""
         try:
             client = pipe or self.redis_client
             client.lrem(Config.redis_queue_key, 1, bench_name)
         except Exception as e:
             self.log(f"Error removing {bench_name} from start queue: {e}")
 
-    def _remove_and_add_failed_status(self, bench_name: str, info: str, throttle: bool=False):
+    def _remove_and_add_failed_status(self, bench_name, info, throttle=False):
         """Atomically remove bench from start queue and add failed status."""
         try:
             with self.redis_client.pipeline() as pipe:
