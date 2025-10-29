@@ -12,6 +12,9 @@ from filelock import FileLock, Timeout
 
 
 class HelperMixin:
+    def log(self, message):
+        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
+
     def _get_current_container_memory(self, container):
         try:
             if isinstance(container, str):
@@ -86,7 +89,7 @@ class HelperMixin:
             last_activity = self._get_last_activity_time(log_files)
             if not last_activity:
                 self.log(f"Could not determine last activity for {container.name}")
-                return uptime < datetime.timedelta(hours=inactive_threshold_hours)
+                return uptime < datetime.timedelta(hours=inactive_threshold_hours) # TODO: should i just assume active here?
 
             # Calculate time since last activity
             time_since_activity = now - last_activity
@@ -102,6 +105,8 @@ class Config:
     check_interval_minutes: int = 15
     inactive_threshold_hours: float = 3.0
     min_uptime_hours: float = 2.0
+    mem_stats_min_uptime_hours: float = 0.25  # Start updating stat(s) after 15 mins uptime for a container
+    mem_stats_activity_threshold_hours: float = 0.5  # Only update stats for recently active containers (accessed within 30 mins)
     stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     cadvisor_endpoint: str = "http://127.0.0.1:9338/api/v1.3/docker"
 
@@ -135,10 +140,10 @@ class BenchStopper(HelperMixin):
 
         return self.docker_client
 
-    def _get_cadvisor_memory_stats(self, container_id):
+    def _get_cadvisor_memory_stats(self, container):
         try:
             # Get container stats from cAdvisor
-            response = requests.get( f"{Config.cadvisor_endpoint}/{container_id}", timeout=15)
+            response = requests.get( f"{Config.cadvisor_endpoint}/{container.id}", timeout=15)
             if response.status_code != 200:
                 self.log(f"cAdvisor request failed with status {response.status_code}")
                 return None, None
@@ -146,7 +151,7 @@ class BenchStopper(HelperMixin):
             data = response.json()
             container_data = next(iter(data.values())) # assuming the 1st value in dict will be the cdata
             if not container_data:
-                self.log(f"Data not found for {container_id} in cAdvisor data")
+                self.log(f"Data not found for {container.name}, id: {container.id} in cAdvisor data")
                 return None, None
 
             stats = container_data.get('stats', [])
@@ -154,13 +159,13 @@ class BenchStopper(HelperMixin):
             # Get the latest stats entry (should be the most recent)
             latest_stat = stats[-1] if stats else None
             if not latest_stat:
-                self.log(f"No stats found for container {container_id}")
+                self.log(f"No stats found for container {container.name}, id: {container.id}")
                 return None, None
 
             memory_stats = latest_stat.get('memory', {})
             return memory_stats.get('usage'), memory_stats.get('max_usage')
         except Exception as e:
-            self.log(f"Error fetching cAdvisor data for {container_id}: {e}")
+            self.log(f"Error fetching cAdvisor data for {container.name}, id: {container.id}: {e}")
 
         return None, None
 
@@ -180,10 +185,12 @@ class BenchStopper(HelperMixin):
 
     def _update_container_memory_usage(self, container):
         """Get container memory usage statistics and update mem_stats."""
-        # TODO: maybe dont update container mem stats if container is not "active"
+        # only update these if the container has been up for sometime and has been active recently
+        if not self._is_container_active(container, Config.mem_stats_min_uptime_hours, Config.mem_stats_activity_threshold_hours):
+            self.log(f"Skipping updating memory stats for container: {container.name} - considering not actively in use")
+            return
 
-        current_memory, max_memory = self._get_cadvisor_memory_stats(container.id)
-
+        current_memory, max_memory = self._get_cadvisor_memory_stats(container)
         if not current_memory:
             # fallback: Get current memory usage from container API
             current_memory = self._get_current_container_memory(container)
@@ -201,6 +208,7 @@ class BenchStopper(HelperMixin):
         try:
             self._update_container_memory_usage(container)
 
+            # TODO: optimize - this is being called 2nd time here when the values haven't probably changed much
             if not self._is_container_active(container, Config.min_uptime_hours, Config.inactive_threshold_hours):
                 with FileLock(f"/tmp/{container.name}.lock", timeout=0):
                     container.stop()
@@ -266,9 +274,6 @@ class BenchStopper(HelperMixin):
                     break
 
         self.log("Bench stopper stopped")
-
-    def log(self, message):
-        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
 
 
 if __name__ == "__main__":
