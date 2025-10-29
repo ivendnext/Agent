@@ -812,7 +812,7 @@ class Bench(Base):
                 if self.server.allow_sleepy_containers:
                     from agent.bench_starter import BenchStarter
 
-                    BenchStarter().request_start(self.name)
+                    BenchStarter().queue_request(self.name)
                 else:
                     self._start()
 
