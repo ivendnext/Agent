@@ -24,9 +24,8 @@ class Config:
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
     activity_threshold_hours: float = 0.5  # Consider container active if accessed within last 30 mins (for mem adjustment)
-    min_uptime_hours: float = 0.5 # Container must be up for at least 30 mins to be considered for mem adjustment
+    min_uptime_hours: float = 0.25 # Minimum uptime (15 mins) before checking activity logs (for mem adjustment)
     available_memory_adjustment_percent: float = 20.0  # Max 20% of available memory for adjustments
-
 
 
 class BenchStarter(HelperMixin):
@@ -143,7 +142,7 @@ class BenchStarter(HelperMixin):
             return max(0, avg - current_usage)
 
         except Exception as e:
-            self.log(f"Error calculating predictive adjustment for {bench_name}: {e}")
+            self.log(f"Error calculating memory adjustment for {bench_name}: {e}")
 
         return 0
 
@@ -325,9 +324,6 @@ class BenchStarter(HelperMixin):
                     break
 
         self.log("Bench Starter stopped")
-
-    def log(self, message):
-        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
 
 
 if __name__ == "__main__":
