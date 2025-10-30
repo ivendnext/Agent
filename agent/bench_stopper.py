@@ -103,10 +103,14 @@ class HelperMixin:
 
 class Config:
     check_interval_minutes: int = 15
-    inactive_threshold_hours: float = 3.0
+    # this is the min uptime the container should have to start looking at the activity logs (for stopping the container(s) - assume them to be active if uptime less than this time)
     min_uptime_hours: float = 2.0
-    mem_stats_min_uptime_hours: float = 0.25  # Start updating stat(s) after 15 mins uptime for a container
-    mem_stats_activity_threshold_hours: float = 0.5  # Only update stats for recently active containers (accessed within 30 mins)
+    # this is the max inactivity time for which if the container has not been accessed, it can be stopped
+    inactive_threshold_hours: float = 3.0
+    # this is the min uptime the container should have to start looking at the activity logs for mem stats updation (assume container(s) to be active if uptime less than this time)
+    mem_stats_min_uptime_hours: float = 0.5
+    # Only update mem stats for recently active containers (accessed within last hour)
+    mem_stats_activity_threshold_hours: float = 1.0
     stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     cadvisor_endpoint: str = "http://127.0.0.1:9338/api/v1.3/docker"
 
@@ -183,10 +187,10 @@ class BenchStopper(HelperMixin):
 
         return final_average
 
-    def _update_container_memory_usage(self, container):
+    def _update_container_memory_usage(self, container, skip_container_active_check=False):
         """Get container memory usage statistics and update mem_stats."""
         # only update these if the container has been up for sometime and has been active recently
-        if not self._is_container_active(container, Config.mem_stats_min_uptime_hours, Config.mem_stats_activity_threshold_hours):
+        if not skip_container_active_check and not self._is_container_active(container, Config.mem_stats_min_uptime_hours, Config.mem_stats_activity_threshold_hours):
             self.log(f"Skipping updating memory stats for container: {container.name} - considering not actively in use")
             return
 
@@ -206,7 +210,9 @@ class BenchStopper(HelperMixin):
     def _process_container(self, container):
         """Process a single container for potential stopping."""
         try:
-            self._update_container_memory_usage(container)
+            # TODO: setting skip_container_active_check to True here as I'm not sure if we should check this or not
+            # there could be cases like background jobs consuming more memory than when the contianer was active
+            self._update_container_memory_usage(container, skip_container_active_check=True)
 
             # TODO: optimize - this is being called 2nd time here when the values haven't probably changed much
             if not self._is_container_active(container, Config.min_uptime_hours, Config.inactive_threshold_hours):
