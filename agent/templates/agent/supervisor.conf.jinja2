@@ -56,7 +56,7 @@ directory={{ directory }}
 
 {% endif %}
 
-{% if is_proxy_server %}
+{% if is_proxy_server or is_standalone %}
 [program:nginx_reload_manager]
 command=bash -c "{{ directory }}/repo/wait-for-it.sh redis://127.0.0.1:{{ redis_port }} && exec {{directory}}/env/bin/python {{ directory }}/repo/agent/nginx_reload_manager.py"
 environment=PYTHONUNBUFFERED=1
@@ -70,4 +70,4 @@ directory={{ directory }}
 {% endif %}
 
 [group:agent]
-programs=web, redis, worker{% if is_proxy_server %}, nginx_reload_manager{% endif %}{% if allow_sleepy_containers %}, bench-starter, bench-stopper{% endif %}
+programs=web, redis, worker{% if is_proxy_server or is_standalone %}, nginx_reload_manager{% endif %}{% if allow_sleepy_containers %}, bench-starter, bench-stopper{% endif %}

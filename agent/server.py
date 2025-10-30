@@ -17,18 +17,19 @@ from peewee import MySQLDatabase
 
 from agent.application_storage_analyzer import (
     analyze_benches_structure,
+    format_size,
     parse_docker_df_output,
     parse_total_disk_usage_output,
     to_bytes,
 )
 from agent.base import AgentException, Base
 from agent.bench import Bench
-from agent.devbox import Devbox
-from agent.exceptions import BenchNotExistsException
+from agent.exceptions import BenchNotExistsException, RegistryDownException
 from agent.job import Job, Step, job, step
+from agent.nfs_handler import NFSHandler
 from agent.patch_handler import run_patches
 from agent.site import Site
-from agent.utils import get_supervisor_processes_status
+from agent.utils import get_supervisor_processes_status, is_registry_healthy
 
 
 class Server(Base):
@@ -36,6 +37,13 @@ class Server(Base):
         super().__init__()
 
         self.directory = directory or os.getcwd()
+        self.set_config_attributes()
+
+        self.job = None
+        self.step = None
+
+    def set_config_attributes(self):
+        """Setting config attributes here to enable easy config reloads"""
         self.config_file = os.path.join(self.directory, "config.json")
         self.name = self.config["name"]
         self.benches_directory = self.config["benches_directory"]
@@ -46,8 +54,6 @@ class Server(Base):
         self.allow_sleepy_containers = bool(self.config.get("allow_sleepy_containers", False))
 
         self.error_pages_directory = os.path.join(self.directory, "repo", "agent", "pages")
-        self.job = None
-        self.step = None
 
     @property
     def press_url(self):
@@ -62,8 +68,22 @@ class Server(Base):
     def is_container_running(self, name):
         return bool(self.execute(f"docker ps --filter name={name} --filter status=running --format '{{{{.Names}}}}'")["output"])
 
+    def establish_connection_with_registry(self, max_retries: int, registry: dict[str, str]):
+        """Given the attempt count try and establish connection with the registry else Raise"""
+        for attempt in range(max_retries):
+            try:
+                if not is_registry_healthy(registry["url"], registry["username"], registry["password"]):
+                    raise RegistryDownException("Registry is not available")
+                break
+            except RegistryDownException as e:
+                if attempt == max_retries - 1:
+                    raise Exception("Failed to pull image") from e
+
+                time.sleep(60)
+
     @step("Initialize Bench")
-    def bench_init(self, name, config):
+    def bench_init(self, name, config, registry: dict[str, str]):
+        self.establish_connection_with_registry(max_retries=3, registry=registry)
         bench_directory = os.path.join(self.benches_directory, name)
         os.mkdir(bench_directory)
         directories = ["logs", "sites", "config"]
@@ -104,27 +124,74 @@ class Server(Base):
             "config": self.config,
         }
 
+    def update_redis_password(self, bench: Bench, redis_password: str) -> None:
+        """Updates redis-cache and redis-queue with agent stored hash"""
+        redis_cache_conf = os.path.join(bench.config_directory, "redis-cache.conf")
+        redis_queue_conf = os.path.join(bench.config_directory, "redis-queue.conf")
+
+        requirepass_line = f"requirepass {redis_password}\n"
+
+        for conf_file in [redis_cache_conf, redis_queue_conf]:
+            with open(conf_file, "r") as f:
+                lines = f.readlines()
+
+            has_requirepass = any(line.strip().startswith("requirepass") for line in lines)
+
+            if not has_requirepass:
+                lines.append(requirepass_line)
+
+                with open(conf_file, "w") as f:
+                    f.writelines(lines)
+
+    @job("Set Redis Password", priority="high")
+    def set_redis_password(self, redis_password: str):
+        """Set redis password for existing benches"""
+        return self._set_redis_password(redis_password)
+
+    @step("Set Redis Password")
+    def _set_redis_password(self, redis_password: str):
+        for _, bench in self.benches.items():
+            for port in ("11000", "13000"):  # for cache and queue
+                bench.docker_execute(
+                    f"redis-cli --raw -p {port} CONFIG SET requirepass '{redis_password}' "
+                    f"&& redis-cli --raw -p {port} -a '{redis_password}' CONFIG SET protected-mode no "
+                    f"&& redis-cli --raw -p {port} -a '{redis_password}' CONFIG REWRITE"
+                )
+
     @job("New Bench", priority="low")
-    def new_bench(self, name, bench_config, common_site_config, registry, mounts=None):
+    def new_bench(
+        self,
+        name,
+        bench_config,
+        common_site_config,
+        registry,
+        redis_password: str | None = None,
+        mounts=None,
+    ):
         self.docker_login(registry)
-        self.bench_init(name, bench_config)
+        self.bench_init(name, bench_config, registry)
         bench = Bench(name, self, mounts=mounts)
         bench.update_config(common_site_config, bench_config)
+        if redis_password:
+            self.update_redis_password(bench, redis_password)
         if bench.bench_config.get("single_container") and not bench.for_devbox:
             bench.generate_supervisor_config()
         bench.deploy()
         bench.setup_nginx()
 
-    def container_exists(self, name: str):
+    def container_exists(self, name: str, max_retries: int = 3):
         """
-        Throw if container exists
+        Throw if container exists; after 5 retries with backoff of 5 seconds
         """
-        try:
-            self.execute(f"""docker ps --filter "name=^{name}$" | grep {name}""")
-        except AgentException:
-            pass  # container does not exist
-        else:
-            raise Exception("Container exists")
+        for attempt in range(max_retries):
+            try:
+                self.execute(f"""docker ps --filter "name=^{name}$" | grep {name}""")
+            except AgentException:
+                break  # container does not exist
+            else:
+                if attempt == max_retries - 1:
+                    raise Exception("Container exists")
+                time.sleep(5)
 
     def get_image_size(self, image_tag: str):
         try:
@@ -139,6 +206,169 @@ class Server(Base):
         except AgentException:
             pass
 
+    def unused_image_size(self) -> list[float]:
+        """Get the sizes of all the images that are not in use in bytes"""
+        images_present = self.execute("docker image ls --format '{{.Repository}}:{{.Tag}} {{.Size}}'")[
+            "output"
+        ].split("\n")
+        images_present = [image.split() for image in images_present]
+        images_in_use = self.execute("docker container ls --format {{.Image}}")["output"].split("\n")
+
+        return [to_bytes(size) for image_name, size in images_present if image_name not in images_in_use]
+
+    def get_reclaimable_size(self) -> dict[str, dict[str, float] | float]:
+        """Checks archived (bench and site) and unused docker artefacts size"""
+        archived_sites_directory = os.path.join(self.benches_directory, "*", "sites", "archived")
+        archived_folder_size = self.execute(
+            "du -sB1 /home/frappe/archived/ --exclude assets | awk '{print $1}'"
+        ).get("output")
+        archived_folder_size = float(archived_folder_size)
+
+        try:
+            site_archived_folder_size = (
+                self.execute(f"du -sB1 {archived_sites_directory} --exclude assets | awk '{{print $1}}'")
+                .get("output")
+                .split("\n")
+            )
+            site_archived_folder_size = sum(map(float, site_archived_folder_size))
+        except Exception:
+            site_archived_folder_size = 0
+
+        unused_images_size = sum(self.unused_image_size())
+        total_archived_folder_size = archived_folder_size + site_archived_folder_size
+
+        formatted_archived_folder_size = f"{round(total_archived_folder_size / 1024**3, 2)}GB"
+        formatted_unused_image_size = format_size(unused_images_size)
+
+        return {
+            "archived": formatted_archived_folder_size,
+            "images": formatted_unused_image_size,
+            "total": round((unused_images_size + total_archived_folder_size) / 1024**3, 2),
+        }
+
+    def _check_site_on_bench(self, bench_name: str):
+        """Check if sites are present on the benches"""
+        sites_directory = f"/home/frappe/benches/{bench_name}/sites"
+        for possible_site in os.listdir(sites_directory):
+            if os.path.exists(os.path.join(sites_directory, possible_site, "site_config.json")):
+                raise Exception(f"Bench {bench_name} has sites")
+
+    def disable_production_on_bench(self, name: str):
+        """In case of corrupted bench / site config don't stall archive"""
+        self._check_site_on_bench(name)
+        self.execute(f"docker rm {name} --force")
+
+    @job("Run Benches on Shared FS")
+    def change_bench_directory(
+        self,
+        directory: str,
+        is_primary: bool,
+        secondary_server_private_ip: str,
+        redis_password: str,
+        redis_connection_string_ip: str,
+        restart_benches: bool = True,
+        registry_settings: dict | None = None,
+    ):
+        self._change_bench_directory(directory)
+        self.set_config_attributes()
+        self.update_agent_nginx_config()
+        self.update_bench_nginx_config()
+        self._reload_nginx()
+
+        self._update_site_config_with_new_rq_conf(
+            redis_connection_string_ip, redis_password
+        )  # Update common site config
+
+        if restart_benches:
+            # We will only start with secondary server private IP if this is a secondary server
+            self.restart_benches(
+                is_primary=is_primary,
+                registry_settings=registry_settings,
+                redis_password=redis_password,
+                secondary_server_private_ip=secondary_server_private_ip if not is_primary else None,
+            )
+
+    @step("Configure Site with Redis Private IP")
+    def _update_site_config_with_new_rq_conf(self, private_ip: str, redis_password: str):
+        for _, bench in self.benches.items():
+            common_site_config = bench.get_config(for_update=True)
+
+            for key in ("redis_cache", "redis_queue", "redis_socketio"):
+                if private_ip != "localhost":
+                    port = (
+                        bench.bench_config["rq_port"]
+                        if key == "redis_queue"
+                        else bench.bench_config["rq_cache_port"]
+                    )
+                else:
+                    port = 11000 if key == "redis_queue" else 13000
+
+                updated_connection_string = f"redis://:{redis_password}@{private_ip}:{port}"
+                common_site_config.update({key: updated_connection_string})
+
+            bench.set_config(common_site_config)
+
+    @step("Change Bench Directory")
+    def _change_bench_directory(self, directory: str):
+        self.update_config({"benches_directory": directory})
+
+    @step("Update Agent Nginx Conf File")
+    def update_agent_nginx_config(self):
+        self._generate_nginx_config()
+
+    @step("Update Bench Nginx Conf File")
+    def update_bench_nginx_config(self):
+        from filelock import FileLock
+
+        for _, bench in self.benches.items():
+            with FileLock(os.path.join(bench.directory, "nginx.config.lock")):
+                # Don't want to use setup_nginx as it reloads everytime
+                bench.generate_nginx_config()
+
+    @step("Restart Benches")
+    def restart_benches(
+        self,
+        is_primary: bool,
+        secondary_server_private_ip: str,
+        redis_password: str,
+        registry_settings: dict[str, str],
+    ):
+        if not is_primary:
+            # Don't need to pull images on primary server
+            self.docker_login(registry_settings)
+        for _, bench in self.benches.items():
+            self.update_redis_password(bench, redis_password)  # Update redis conf files
+            bench.start(secondary_server_private_ip=secondary_server_private_ip)
+
+    @job("Stop Bench Workers")
+    def stop_bench_workers(self):
+        self._stop_bench_workers()
+
+    @step("Stop Bench Workers")
+    def _stop_bench_workers(self):
+        """Stop all workers except redis"""
+        for _, bench in self.benches.items():
+            bench.docker_execute("supervisorctl stop frappe-bench-web: frappe-bench-workers:", as_root=True)
+
+    @job("Start Bench Workers")
+    def start_bench_workers(self):
+        self._start_bench_workers()
+
+    @step("Start Bench Workers")
+    def _start_bench_workers(self):
+        """Start all workers"""
+        for _, bench in self.benches.items():
+            bench.docker_execute("supervisorctl start frappe-bench-web: frappe-bench-workers:", as_root=True)
+
+    @job("Force Remove All Benches")
+    def force_remove_all_benches(self):
+        self._force_remove_all_benches()
+
+    @step("Force Remove All Benches")
+    def _force_remove_all_benches(self):
+        for _, bench in self.benches.items():
+            bench.execute(f"docker rm {bench.name} --force")
+
     @job("Archive Bench", priority="low")
     def archive_bench(self, name):
         bench_directory = os.path.join(self.benches_directory, name)
@@ -147,7 +377,7 @@ class Server(Base):
         try:
             bench = Bench(name, self)
         except json.JSONDecodeError:
-            pass
+            self.disable_production_on_bench(name)
         except FileNotFoundError as e:
             if not e.filename.endswith("common_site_config.json"):
                 raise
@@ -155,14 +385,17 @@ class Server(Base):
             if bench.sites and not bench.for_devbox:
                 raise Exception(f"Bench has sites: {bench.sites}")
             bench.disable_production()
+
         self.container_exists(name)
         self.move_bench_to_archived_directory(name)
 
     @job("Cleanup Unused Files", priority="low")
-    def cleanup_unused_files(self):
-        self.remove_archived_benches()
-        self.remove_temporary_files()
+    def cleanup_unused_files(self, force: bool = False):
+        self.remove_archived_benches(force)
+        self.remove_temporary_files(force)
         self.remove_unused_docker_artefacts()
+        if force:
+            self.remove_archived_sites()
 
     def remove_benches_without_container(self, benches: list[str]):
         for bench in benches:
@@ -172,14 +405,21 @@ class Server(Base):
                 if e.data.returncode:
                     self.move_to_archived_directory(Bench(bench, self))
 
+    @step("Remove Archived Sites")
+    def remove_archived_sites(self):
+        for bench in self.benches:
+            archived_sites_path = os.path.join(self.benches_directory, bench, "sites", "archived")
+            if os.path.exists(archived_sites_path) and os.path.isdir(archived_sites_path):
+                shutil.rmtree(archived_sites_path)
+
     @step("Remove Archived Benches")
-    def remove_archived_benches(self):
+    def remove_archived_benches(self, force: bool = False):
         now = datetime.now().timestamp()
         removed = []
         if os.path.exists(self.archived_directory):
             for bench in os.listdir(self.archived_directory):
                 bench_path = os.path.join(self.archived_directory, bench)
-                if now - os.stat(bench_path).st_mtime > 86400:
+                if force or (now - os.stat(bench_path).st_mtime > 86400):
                     removed.append(
                         {
                             "bench": bench,
@@ -193,7 +433,7 @@ class Server(Base):
         return {"benches": removed[:100]}
 
     @step("Remove Temporary Files")
-    def remove_temporary_files(self):
+    def remove_temporary_files(self, force: bool = False):
         temp_directory = tempfile.gettempdir()
         now = datetime.now().timestamp()
         removed = []
@@ -203,7 +443,7 @@ class Server(Base):
                 if not list(filter(lambda x: x in file, patterns)):
                     continue
                 file_path = os.path.join(temp_directory, file)
-                if now - os.stat(file_path).st_mtime > 7200:
+                if force or (now - os.stat(file_path).st_mtime > 7200):
                     removed.append({"file": file, "size": self._get_tree_size(file_path)})
                     if os.path.isfile(file_path):
                         os.remove(file_path)
@@ -234,6 +474,12 @@ class Server(Base):
         if os.path.exists(target):
             shutil.rmtree(target)
         bench_directory = os.path.join(self.benches_directory, bench_name)
+        assets_directory = os.path.join(bench_directory, "sites", "assets")
+
+        # Dropping assets we don't restore that anyways
+        if os.path.exists(assets_directory):
+            shutil.rmtree(assets_directory)
+
         self.execute(f"mv {bench_directory} {self.archived_directory}")
 
     @job("Update Site Pull", priority="low")
@@ -457,11 +703,64 @@ class Server(Base):
     def update_supervisor(self):
         return self._update_supervisor()
 
+    @job("Update Database Host", priority="high")
+    def update_database_host_job(self, db_host: str):
+        self.update_database_host_step(db_host)
+
+    @step("Update Database Host")
+    def update_database_host_step(self, db_host: str):
+        for b in self.benches.values():
+            b._update_database_host(db_host)
+
     def setup_authentication(self, password):
         self.update_config({"access_token": pbkdf2.hash(password)})
 
     def setup_proxysql(self, password):
         self.update_config({"proxysql_admin_password": password})
+
+    @job("Add Servers to ACL")
+    def add_to_acl(
+        self,
+        primary_server_private_ip: str,
+        secondary_server_private_ip: str,
+        shared_directory: bool,
+    ) -> None:
+        return self._add_to_acl(
+            primary_server_private_ip,
+            secondary_server_private_ip,
+            shared_directory,
+        )
+
+    @step("Add Servers to ACL")
+    def _add_to_acl(
+        self,
+        primary_server_private_ip: str,
+        secondary_server_private_ip: str,
+        shared_directory: str,
+    ):
+        nfs_handler = NFSHandler(self)
+        return nfs_handler.add_to_acl(
+            primary_server_private_ip=primary_server_private_ip,
+            secondary_server_private_ip=secondary_server_private_ip,
+            shared_directory=shared_directory,
+        )
+
+    @job("Remove Server from ACL")
+    def remove_from_acl(
+        self, shared_directory: str, primary_server_private_ip: str, secondary_server_private_ip: str
+    ) -> None:
+        return self._remove_from_acl(shared_directory, primary_server_private_ip, secondary_server_private_ip)
+
+    @step("Remove Server from ACL")
+    def _remove_from_acl(
+        self, shared_directory: str, primary_server_private_ip: str, secondary_server_private_ip: str
+    ):
+        nfs_handler = NFSHandler(self)
+        return nfs_handler.remove_from_acl(
+            shared_directory=shared_directory,
+            primary_server_private_ip=primary_server_private_ip,
+            secondary_server_private_ip=secondary_server_private_ip,
+        )
 
     def update_config(self, value):
         config = self.get_config(for_update=True)
@@ -623,7 +922,7 @@ class Server(Base):
 
     @staticmethod
     def run_ncdu_command(path: str, excludes: list | None = None) -> str | None:
-        cmd = ["ncdu", path, "-o", "/dev/stdout"]
+        cmd = ["ncdu", path, "-x", "-o", "/dev/stdout"]
         if excludes:
             for item in excludes:
                 cmd.extend(["--exclude", item])
@@ -827,6 +1126,7 @@ class Server(Base):
                 "nginx_vts_module_enabled": self.config.get("nginx_vts_module_enabled", True),
                 "ip_whitelist": self.config.get("ip_whitelist", []),
                 "allow_sleepy_containers": self.allow_sleepy_containers,
+                "use_shared": self.config.get("benches_directory") == "/shared",
             },
             nginx_config,
         )
@@ -873,6 +1173,7 @@ class Server(Base):
             "user": self.config["user"],
             "sentry_dsn": self.config.get("sentry_dsn"),
             "allow_sleepy_containers": self.allow_sleepy_containers,
+            "is_standalone": self.config.get("standalone", False),
         }
         if self.config.get("name").startswith("n") or "proxy" in self.config.get("name"):
             data["is_proxy_server"] = True
@@ -884,7 +1185,15 @@ class Server(Base):
         )
 
     def _reload_nginx(self):
-        return self.execute("sudo systemctl reload nginx")
+        try:
+            return self.execute("sudo systemctl reload nginx")
+        except AgentException as e:
+            try:
+                self.execute("sudo nginx -t")
+            except AgentException as e2:
+                raise e2 from e
+            else:
+                raise e
 
     def _render_template(self, template, context, outfile, options=None):
         if options is None:

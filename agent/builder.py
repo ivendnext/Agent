@@ -9,11 +9,11 @@ from subprocess import Popen
 from typing import TYPE_CHECKING
 
 import docker
-import requests
 
 from agent.base import Base
 from agent.exceptions import RegistryDownException
 from agent.job import Job, Step, job, step
+from agent.utils import is_registry_healthy
 
 if TYPE_CHECKING:
     from typing import Literal
@@ -138,21 +138,6 @@ class ImageBuilder(Base):
             self._publish_throttled_output(False)
         self._publish_throttled_output(True)
 
-    def is_registry_healthy(self) -> bool:
-        """Check if production registry (only) is healthy in the push cycle"""
-        headers = {"Accept": "application/vnd.docker.distribution.manifest.v2+json"}
-
-        if self.registry["url"] != "registry.frappe.cloud":
-            return True
-
-        response = requests.get(
-            f"https://{self.registry['url']}/v2",
-            auth=(self.registry["username"], self.registry["password"]),
-            headers=headers,
-        )
-
-        return response.ok
-
     def _wait_for_registry_recovery(self):
         """Wait for registry to recover after restart"""
         time.sleep(60)
@@ -164,13 +149,18 @@ class ImageBuilder(Base):
         client = docker.from_env(environment=environment, timeout=5 * 60)
 
         for attempt in range(max_retries):
+            self.output["push"].append({"id": "Retry", "output": "", "status": f"Success {attempt}"})
             try:
-                if not self.is_registry_healthy():
+                if not is_registry_healthy(
+                    self.registry["url"], self.registry["username"], self.registry["password"]
+                ):
                     raise RegistryDownException("Registry is currently down")
 
                 self._push_image(client)
 
-                if not self.is_registry_healthy():
+                if not is_registry_healthy(
+                    self.registry["url"], self.registry["username"], self.registry["password"]
+                ):
                     raise RegistryDownException("Registry became unhealthy after push")
 
                 return self.output["push"]

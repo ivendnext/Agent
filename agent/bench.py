@@ -739,7 +739,7 @@ class Bench(Base):
 
         return mounts_cmd
 
-    def start(self):
+    def start(self, secondary_server_private_ip: str | None = None):
         if self.bench_config.get("single_container"):
             try:
                 self.execute(f"docker stop {self.name}")
@@ -748,11 +748,18 @@ class Bench(Base):
                 pass
 
             ssh_port = self.bench_config.get("ssh_port", self.bench_config["web_port"] + 4000)
-            ssh_ip = self.bench_config.get("private_ip", "127.0.0.1")
+            ssh_ip = secondary_server_private_ip or self.bench_config.get("private_ip", "127.0.0.1")
 
             restart_policy = "unless-stopped" if self.server.allow_sleepy_containers else "always"
             rq_port = self.bench_config.get("rq_port")
-            rq_port_mapping = f"-p 127.0.0.1:{rq_port}:11000 "
+            rq_cache_port = self.bench_config.get("rq_cache_port")
+
+            if not rq_cache_port:
+                # [Auto Scaling] We need to expose this when we restart the container regardless
+                offset = 18000 - self.bench_config["web_port"]
+                rq_cache_port = 13000 + offset
+
+            rq_port_mapping = f"-p 0.0.0.0:{rq_port}:11000 "  # need to expose to secondary server
 
             bench_directory = "/home/frappe/frappe-bench"
             mounts = self.prepare_mounts_on_host(bench_directory)
@@ -763,9 +770,11 @@ class Bench(Base):
             command = (
                 "docker run -d --init -u frappe "
                 f"--restart {restart_policy} --hostname {self.name} "
+                "--security-opt seccomp=unconfined "
                 f"-p 127.0.0.1:{self.bench_config['web_port']}:8000 "
                 f"-p 127.0.0.1:{self.bench_config['socketio_port']}:9000 "
                 f"-p 127.0.0.1:{self.bench_config['codeserver_port']}:8088 "
+                f"-p 0.0.0.0:{rq_cache_port}:13000 "
                 f"{rq_port_mapping if rq_port else ''}"
                 f"-p {ssh_ip}:{ssh_port}:2200 "
                 f"-v {self.sites_directory}:{bench_directory}/sites "
@@ -846,6 +855,9 @@ class Bench(Base):
             cmd += f" --cpus={vcpu}"
         return self.execute(cmd)
 
+    def _update_database_host(self, db_host: str):
+        self._update_config({"db_host": db_host})
+
     @property
     def job_record(self):
         return self.server.job_record
@@ -921,8 +933,14 @@ class Bench(Base):
             os.fsync(temp_file.fileno())
             temp_file.close()
 
-        shutil.copy2(temp_file.name, self.bench_config_file)
-        os.remove(temp_file.name)
+        os.rename(self.bench_config_file, self.bench_config_file + ".bak")
+
+        try:
+            shutil.copy2(temp_file.name, self.bench_config_file)
+            os.remove(temp_file.name)
+        except Exception as e:
+            os.rename(self.bench_config_file + ".bak", self.bench_config_file)
+            raise e
 
     @job("Patch App")
     def patch_app(
