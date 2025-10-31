@@ -792,16 +792,9 @@ class Bench(Base):
         return self.execute(command)
 
     def stop(self):
-        def _stop_and_remove_single():
+        if self.bench_config.get("single_container"):
             self.execute(f"docker stop {self.name}")
             return self.execute(f"docker rm {self.name}")
-
-        if self.bench_config.get("single_container"):
-            if self.server.allow_sleepy_containers:
-                ctx, param = (lm, self.name) if (lm := get_container_lock_manager()) else (FileLock(f"/tmp/{self.name}.lock"), 60)
-                with ctx.acquire(param):
-                    return _stop_and_remove_single()
-            return _stop_and_remove_single()
         return self.execute(f"docker stack rm {self.name}")
 
     @step("Stop Bench")
@@ -829,7 +822,7 @@ class Bench(Base):
             with get_container_lock_manager().acquire(self.name):
                 # if container is stopped - it should remain in that condition - as we dont know the memory consumption of the server
                 # queue the request to start the container (if the container was running)
-                _update_limits(self.server.is_container_running())
+                _update_limits(self.server.is_container_running(self.name))
         else:
            _update_limits(True)
 

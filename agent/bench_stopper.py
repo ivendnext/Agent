@@ -84,13 +84,14 @@ class HelperMixin:
             log_files = self._find_log_files_for_bench(container.name)
             if not log_files:
                 self._log(f"No log files found for bench {container.name}")
-                return False
+                # just keep things active upto the threshold time and then convey them as inactive
+                return uptime < datetime.timedelta(hours=inactive_threshold_hours)
 
             # Check last activity based on file modification times
             last_activity = self._get_last_activity_time(log_files)
             if not last_activity:
                 self._log(f"Could not determine last activity for {container.name}")
-                return uptime < datetime.timedelta(hours=inactive_threshold_hours) # TODO: should i just assume active here?
+                return uptime < datetime.timedelta(hours=inactive_threshold_hours)
 
             # Calculate time since last activity
             time_since_activity = now - last_activity
@@ -206,7 +207,6 @@ class BenchStopper(HelperMixin):
             # there could be cases like background jobs consuming more memory than when the contianer was active
             self._update_container_memory_usage(container, skip_container_active_check=True)
 
-            # TODO: optimize - this is being called 2nd time here when the values haven't probably changed much
             if not self._is_container_active(container, Config.min_uptime_hours, Config.inactive_threshold_hours):
                 with FileLock(f"/tmp/{container.name}.lock", timeout=0):
                     container.stop()
