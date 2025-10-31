@@ -57,7 +57,7 @@ class BenchStarter(HelperMixin):
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
-        self.log(f"Received signal {signum}, shutting down gracefully...")
+        self._log(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
         if self.sleeping:
             sys.exit(0)
@@ -69,14 +69,7 @@ class BenchStarter(HelperMixin):
                 decode_responses=True
             )
         except Exception as e:
-            self.log(f"Failed to connect to Redis: {e}")
-            raise
-
-    def _init_docker_client(self):
-        try:
-            self.docker_client = docker.from_env()
-        except Exception as e:
-            self.log(f"Failed to connect to Docker: {e}")
+            self._log(f"Failed to connect to Redis: {e}")
             raise
 
     def _get_system_memory_info(self):
@@ -111,7 +104,7 @@ class BenchStarter(HelperMixin):
                     with open(Config.memory_stats_file, 'r') as f:
                         return json.load(f)
         except Exception as e:
-            self.log(f"Could not load memory stats file: {e}")
+            self._log(f"Could not load memory stats file: {e}")
         return {}
 
     def _load_bench_config(self, bench_name):
@@ -119,30 +112,30 @@ class BenchStarter(HelperMixin):
         try:
             return Bench(bench_name, Server()).bench_config
         except Exception as e:
-            self.log(f"Could not load config for bench {bench_name}: {e}")
+            self._log(f"Could not load config for bench {bench_name}: {e}")
         return {}
 
-    def _calculate_memory_adjustment(self, bench_name):
+    def _calculate_memory_adjustment(self, bench):
         """Calculate memory adjustment based on activity."""
         try:
             # Check if container is active
-            if not self._is_container_active(bench_name, Config.min_uptime_hours, Config.activity_threshold_hours):
-                self.log(f"{bench_name} inactive (no recent web activity), skipping adjustment")
+            if not self._is_container_active(bench, Config.min_uptime_hours, Config.activity_threshold_hours):
+                self._log(f"{bench.name} inactive (no recent web activity), skipping adjustment")
                 return 0
 
             # Get current memory usage of the container if it's running
-            current_usage = self._get_current_container_memory(bench_name)
+            current_usage = self._get_current_container_memory(bench)
             if not current_usage or current_usage <= 0:
                 # Container not running or can't get stats
                 return 0
 
-            avg = self.container_mem_stats[bench_name]
+            avg = self.container_mem_stats[bench.name]
 
             # underestimation (how much more memory container uses than current)
             return max(0, avg - current_usage)
 
         except Exception as e:
-            self.log(f"Error calculating memory adjustment for {bench_name}: {e}")
+            self._log(f"Error calculating memory adjustment for {bench.name}: {e}")
 
         return 0
 
@@ -154,7 +147,7 @@ class BenchStarter(HelperMixin):
             if bench.name not in self.container_mem_stats:
                 continue  # No historical data to work with
 
-            total_adjustment += self._calculate_memory_adjustment(bench.name)
+            total_adjustment += self._calculate_memory_adjustment(bench)
 
         available_memory = self._get_system_memory_info()["available_effective_bytes"]
         max_adjustment = int(available_memory * (Config.available_memory_adjustment_percent / 100))
@@ -168,7 +161,7 @@ class BenchStarter(HelperMixin):
         if bench_name in self.container_mem_stats:
             mem_stat = self.container_mem_stats[bench_name]
             if mem_stat > 0:
-                self.log(f"Using historical memory for {bench_name}: {mem_stat/(1024*1024)}MB")
+                self._log(f"Using historical memory for {bench_name}: {mem_stat/(1024*1024)}MB")
                 return mem_stat
 
         # use bench config to figure out the memory - this is an estimate at best
@@ -209,15 +202,15 @@ class BenchStarter(HelperMixin):
                 container = self.docker_client.containers.get(bench_name)
                 if container.status in ("exited", "stopped"):
                     container.start()
-                    self.log(f"Started container {bench_name}")
+                    self._log(f"Started container {bench_name}")
 
             return True
         except docker.errors.NotFound:
-            self.log(f"Container {bench_name} not found")
+            self._log(f"Container {bench_name} not found")
         except Timeout:
-            self.log(f"Could not acquire lock for {bench_name}, skipping")
+            self._log(f"Could not acquire lock for {bench_name}, skipping")
         except Exception as e:
-            self.log(f"Failed to start container {bench_name}: {e}")
+            self._log(f"Failed to start container {bench_name}: {e}")
 
         return False
 
@@ -233,7 +226,7 @@ class BenchStarter(HelperMixin):
 
             return [item.strip() for item in pending_items]
         except Exception as e:
-            self.log(f"Error getting pending benches from Redis: {e}")
+            self._log(f"Error getting pending benches from Redis: {e}")
 
         return []
 
@@ -243,7 +236,7 @@ class BenchStarter(HelperMixin):
             client = pipe or self.redis_client
             client.lrem(Config.redis_queue_key, 1, bench_name)
         except Exception as e:
-            self.log(f"Error removing {bench_name} from start queue: {e}")
+            self._log(f"Error removing {bench_name} from start queue: {e}")
 
     def _remove_and_add_failed_status(self, bench_name, info, throttle=False):
         """Atomically remove bench from start queue and add failed status."""
@@ -260,7 +253,7 @@ class BenchStarter(HelperMixin):
                 # Execute all commands atomically
                 pipe.execute()
         except Exception as e:
-            self.log(f"Error moving {bench_name} to failed queue: {e}")
+            self._log(f"Error moving {bench_name} to failed queue: {e}")
 
     def _process_batch(self):
         # Get pending benches from main queue
@@ -270,13 +263,14 @@ class BenchStarter(HelperMixin):
 
             # Get memory state
             min_available_threshold = self._get_memory_threshold()
+            # TODO: dont adjust if available mem is anyway below threshold
             available_memory = self._get_adjusted_available_memory()
 
         for bench_name in pending_benches:
             if not self.running:
                 break
 
-            self.log(f"Processing {bench_name}")
+            self._log(f"Processing {bench_name}")
             required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
 
             throttle = True
@@ -294,7 +288,7 @@ class BenchStarter(HelperMixin):
                 info = "Please try to queue again and/or contact support."
 
             self._remove_and_add_failed_status(bench_name, info, throttle)
-            self.log(f"Cannot start {bench_name}: {info}")
+            self._log(f"Cannot start {bench_name}: {info}")
 
     def start(self):
         """Start the bench starter service."""
@@ -308,7 +302,7 @@ class BenchStarter(HelperMixin):
                 time.sleep(Config.check_interval_seconds)
                 self.sleeping = False
 
-                self.log("Starting Bench Container Starter")
+                self._log("Starting Bench Container Starter")
 
                 self._init_redis_client()
                 self._init_docker_client()
@@ -316,14 +310,14 @@ class BenchStarter(HelperMixin):
 
                 retries = 3
             except Exception as e:
-                self.log(f"Unexpected error: {e}")
+                self._log(f"Unexpected error: {e}")
 
                 retries -= 1
                 if retries < 0:
-                    self.log("Unable to recover - Exiting")
+                    self._log("Unable to recover - Exiting")
                     break
 
-        self.log("Bench Starter stopped")
+        self._log("Bench Starter stopped")
 
 
 if __name__ == "__main__":
