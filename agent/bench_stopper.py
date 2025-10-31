@@ -12,8 +12,17 @@ from filelock import FileLock, Timeout
 
 
 class HelperMixin:
-    def _log(self, message):
-        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
+    def _setup_signal_handlers(self):
+        """Setup graceful shutdown handlers."""
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals."""
+        self._log(f"Received signal {signum}, shutting down gracefully...")
+        self.running = False
+        if self.sleeping:
+            sys.exit(0)
 
     def _init_docker_client(self):
         try:
@@ -21,6 +30,9 @@ class HelperMixin:
         except Exception as e:
             self._log(f"Failed to connect to Docker: {e}")
             raise
+
+    def _log(self, message):
+        print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
 
     def _get_current_container_memory(self, container):
         try:
@@ -124,18 +136,6 @@ class BenchStopper(HelperMixin):
         self.docker_client = None
         self.mem_stats = None
         self._setup_signal_handlers()
-
-    def _setup_signal_handlers(self):
-        """Setup graceful shutdown handlers."""
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
-
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals."""
-        self._log(f"Received signal {signum}, shutting down gracefully...")
-        self.running = False
-        if self.sleeping:
-            sys.exit(0)
 
     def _get_cadvisor_memory_stats(self, container):
         try:

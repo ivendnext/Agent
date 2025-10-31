@@ -1,10 +1,7 @@
-import sys
 import os
 import time
 import json
-import signal
 import psutil
-import datetime
 from filelock import FileLock, Timeout
 
 import redis
@@ -49,18 +46,6 @@ class BenchStarter(HelperMixin):
                 status = "QUEUED"
 
         return status
-
-    def _setup_signal_handlers(self):
-        """Setup graceful shutdown handlers."""
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
-
-    def _signal_handler(self, signum, frame):
-        """Handle shutdown signals."""
-        self._log(f"Received signal {signum}, shutting down gracefully...")
-        self.running = False
-        if self.sleeping:
-            sys.exit(0)
 
     def _init_redis_client(self):
         try:
