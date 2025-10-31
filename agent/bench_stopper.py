@@ -12,14 +12,18 @@ from filelock import FileLock, Timeout
 
 
 class HelperMixin:
-    def log(self, message):
+    def _log(self, message):
         print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
+
+    def _init_docker_client(self):
+        try:
+            self.docker_client = docker.from_env()
+        except Exception as e:
+            self._log(f"Failed to connect to Docker: {e}")
+            raise
 
     def _get_current_container_memory(self, container):
         try:
-            if isinstance(container, str):
-                container = self.docker_client.containers.get(container)
-
             stats = container.stats(stream=False)
             memory_stats = stats.get('memory_stats', {})
             return memory_stats.get('usage')
@@ -55,16 +59,13 @@ class HelperMixin:
                     latest_mtime = file_datetime
 
             except Exception as e:
-                self.log(f"Error checking modification time for {log_file}: {e}")
+                self._log(f"Error checking modification time for {log_file}: {e}")
 
         return latest_mtime
 
     def _is_container_active(self, container, min_uptime_hours, inactive_threshold_hours):
         """Determine if a container should be stopped based on activity and uptime."""
         try:
-            if isinstance(container, str):
-                container = self.docker_client.containers.get(container)
-
             # Check container uptime
             start_time_str = container.attrs["State"]["StartedAt"]
             start_time = datetime.datetime.fromisoformat(
@@ -76,19 +77,19 @@ class HelperMixin:
 
             # assume containers are active that haven't been running long enough
             if uptime < datetime.timedelta(hours=min_uptime_hours):
-                self.log(f"Container {container.name} uptime {uptime} is below minimum threshold")
+                self._log(f"Container {container.name} uptime {uptime} is below minimum threshold")
                 return True
 
             # Find associated log files
             log_files = self._find_log_files_for_bench(container.name)
             if not log_files:
-                self.log(f"No log files found for bench {container.name}")
+                self._log(f"No log files found for bench {container.name}")
                 return False
 
             # Check last activity based on file modification times
             last_activity = self._get_last_activity_time(log_files)
             if not last_activity:
-                self.log(f"Could not determine last activity for {container.name}")
+                self._log(f"Could not determine last activity for {container.name}")
                 return uptime < datetime.timedelta(hours=inactive_threshold_hours) # TODO: should i just assume active here?
 
             # Calculate time since last activity
@@ -96,7 +97,7 @@ class HelperMixin:
             return time_since_activity < datetime.timedelta(hours=inactive_threshold_hours)
 
         except Exception as e:
-            self.log(f"Error in _is_container_active for container {container.name}: {e}")
+            self._log(f"Error in _is_container_active for container {container.name}: {e}")
 
         return False # assume that container is not active if there are any issues
 
@@ -130,32 +131,23 @@ class BenchStopper(HelperMixin):
 
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals."""
-        self.log(f"Received signal {signum}, shutting down gracefully...")
+        self._log(f"Received signal {signum}, shutting down gracefully...")
         self.running = False
         if self.sleeping:
             sys.exit(0)
-
-    def _init_docker_client(self):
-        try:
-            self.docker_client = docker.from_env()
-        except Exception as e:
-            self.log(f"Failed to connect to Docker: {e}")
-            raise
-
-        return self.docker_client
 
     def _get_cadvisor_memory_stats(self, container):
         try:
             # Get container stats from cAdvisor
             response = requests.get( f"{Config.cadvisor_endpoint}/{container.id}", timeout=15)
             if response.status_code != 200:
-                self.log(f"cAdvisor request failed with status {response.status_code}")
+                self._log(f"cAdvisor request failed with status {response.status_code}")
                 return None, None
 
             data = response.json()
             container_data = next(iter(data.values())) # assuming the 1st value in dict will be the cdata
             if not container_data:
-                self.log(f"Data not found for {container.name}, id: {container.id} in cAdvisor data")
+                self._log(f"Data not found for {container.name}, id: {container.id} in cAdvisor data")
                 return None, None
 
             stats = container_data.get('stats', [])
@@ -163,13 +155,13 @@ class BenchStopper(HelperMixin):
             # Get the latest stats entry (should be the most recent)
             latest_stat = stats[-1] if stats else None
             if not latest_stat:
-                self.log(f"No stats found for container {container.name}, id: {container.id}")
+                self._log(f"No stats found for container {container.name}, id: {container.id}")
                 return None, None
 
             memory_stats = latest_stat.get('memory', {})
             return memory_stats.get('usage'), memory_stats.get('max_usage')
         except Exception as e:
-            self.log(f"Error fetching cAdvisor data for {container.name}, id: {container.id}: {e}")
+            self._log(f"Error fetching cAdvisor data for {container.name}, id: {container.id}: {e}")
 
         return None, None
 
@@ -191,7 +183,7 @@ class BenchStopper(HelperMixin):
         """Get container memory usage statistics and update mem_stats."""
         # only update these if the container has been up for sometime and has been active recently
         if not skip_container_active_check and not self._is_container_active(container, Config.mem_stats_min_uptime_hours, Config.mem_stats_activity_threshold_hours):
-            self.log(f"Skipping updating memory stats for container: {container.name} - considering not actively in use")
+            self._log(f"Skipping updating memory stats for container: {container.name} - considering not actively in use")
             return
 
         current_memory, max_memory = self._get_cadvisor_memory_stats(container)
@@ -218,14 +210,14 @@ class BenchStopper(HelperMixin):
             if not self._is_container_active(container, Config.min_uptime_hours, Config.inactive_threshold_hours):
                 with FileLock(f"/tmp/{container.name}.lock", timeout=0):
                     container.stop()
-                    self.log(f"Stopped inactive container: {container.name}")
+                    self._log(f"Stopped inactive container: {container.name}")
 
         except docker.errors.NotFound:
-            self.log(f"Container {container.name} not found when trying to stop")
+            self._log(f"Container {container.name} not found when trying to stop")
         except Timeout:
-            self.log(f"Could not acquire lock for {container.name}, skipping")
+            self._log(f"Could not acquire lock for {container.name}, skipping")
         except Exception as e:
-            self.log(f"Unexpected error processing container {container.name}: {e}")
+            self._log(f"Unexpected error processing container {container.name}: {e}")
 
     def _load_existing_stats(self):
         """Load existing container stats from JSON file."""
@@ -256,7 +248,7 @@ class BenchStopper(HelperMixin):
                 time.sleep(Config.check_interval_minutes * 60)
                 self.sleeping = False
 
-                self.log("Starting Bench Stopper")
+                self._log("Starting Bench Stopper")
                 self._init_docker_client()
 
                 running_containers = self.docker_client.containers.list()
@@ -272,14 +264,14 @@ class BenchStopper(HelperMixin):
                 self._save_container_stats()
                 retries = 3
             except Exception as e:
-                self.log(f"Unexpected error in main loop: {e}")
+                self._log(f"Unexpected error in main loop: {e}")
 
                 retries -= 1
                 if retries <= 0:
-                    self.log("Unable to recover - Exiting")
+                    self._log("Unable to recover - Exiting")
                     break
 
-        self.log("Bench stopper stopped")
+        self._log("Bench stopper stopped")
 
 
 if __name__ == "__main__":
