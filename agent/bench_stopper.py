@@ -31,6 +31,17 @@ class HelperMixin:
             self._log(f"Failed to connect to Docker: {e}")
             raise
 
+    def _load_memory_stats(self, stats_file):
+        """Load memory stats from the stats file."""
+        try:
+            with FileLock("/tmp/mem_stats.lock"):
+                if os.path.exists(stats_file):
+                    with open(stats_file, 'r') as f:
+                        return json.load(f)
+        except Exception as e:
+            self._log(f"Could not load memory stats file: {e}")
+        return {}
+
     def _log(self, message):
         print(f"[{datetime.datetime.now()}] {message!s}", flush=True)
 
@@ -219,13 +230,6 @@ class BenchStopper(HelperMixin):
         except Exception as e:
             self._log(f"Unexpected error processing container {container.name}: {e}")
 
-    def _load_existing_stats(self):
-        """Load existing container stats from JSON file."""
-        if os.path.exists(Config.stats_file):
-            with open(Config.stats_file, 'r') as f:
-                return json.load(f)
-        return {}
-
     def _save_container_stats(self) -> None:
         if not self.mem_stats:
             return
@@ -253,7 +257,7 @@ class BenchStopper(HelperMixin):
 
                 running_containers = self.docker_client.containers.list()
                 if running_containers:
-                    self.mem_stats = self._load_existing_stats()
+                    self.mem_stats = self._load_memory_stats(Config.stats_file)
 
                 for container in running_containers:
                     if not self.running:
