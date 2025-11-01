@@ -81,17 +81,6 @@ class BenchStarter(HelperMixin):
         total_effective_memory = self._get_system_memory_info()['total_effective_bytes']
         return int(total_effective_memory * (Config.memory_reserve_percent / 100))
 
-    def _load_memory_stats(self):
-        """Load memory stats from the stats file."""
-        try:
-            with FileLock("/tmp/mem_stats.lock"):
-                if os.path.exists(Config.memory_stats_file):
-                    with open(Config.memory_stats_file, 'r') as f:
-                        return json.load(f)
-        except Exception as e:
-            self._log(f"Could not load memory stats file: {e}")
-        return {}
-
     def _load_bench_config(self, bench_name):
         """Load bench configuration from config.json."""
         try:
@@ -114,7 +103,7 @@ class BenchStarter(HelperMixin):
                 # Container not running or can't get stats
                 return 0
 
-            avg = self.container_mem_stats[bench.name]
+            avg = self.mem_stats[bench.name]
 
             # underestimation (how much more memory container uses than current)
             return max(0, avg - current_usage)
@@ -129,7 +118,7 @@ class BenchStarter(HelperMixin):
 
         total_adjustment = 0
         for bench in self.docker_client.containers.list():
-            if bench.name not in self.container_mem_stats:
+            if bench.name not in self.mem_stats:
                 continue  # No historical data to work with
 
             total_adjustment += self._calculate_memory_adjustment(bench)
@@ -143,8 +132,8 @@ class BenchStarter(HelperMixin):
 
     def _calculate_bench_memory_requirement(self, bench_name):
         # First try to get from memory stats file
-        if bench_name in self.container_mem_stats:
-            mem_stat = self.container_mem_stats[bench_name]
+        if bench_name in self.mem_stats:
+            mem_stat = self.mem_stats[bench_name]
             if mem_stat > 0:
                 self._log(f"Using historical memory for {bench_name}: {mem_stat/(1024*1024)}MB")
                 return mem_stat
@@ -209,7 +198,8 @@ class BenchStarter(HelperMixin):
                 Config.batch_size - 1  # Get only batch_size items
             )
 
-            return [item.strip() for item in pending_items]
+            # remove duplicates (if any) while preserving order
+            return list(dict.fromkeys([item.strip() for item in pending_items]))
         except Exception as e:
             self._log(f"Error getting pending benches from Redis: {e}")
 
@@ -244,7 +234,7 @@ class BenchStarter(HelperMixin):
         # Get pending benches from main queue
         pending_benches = self._get_pending_benches()
         if pending_benches:
-            self.container_mem_stats = self._load_memory_stats()
+            self.mem_stats = self._load_memory_stats(Config.memory_stats_file)
 
             # Get memory state
             min_available_threshold = self._get_memory_threshold()
@@ -293,6 +283,7 @@ class BenchStarter(HelperMixin):
                 self._init_docker_client()
                 self._process_batch()
 
+                self.mem_stats = None
                 retries = 3
             except Exception as e:
                 self._log(f"Unexpected error: {e}")
