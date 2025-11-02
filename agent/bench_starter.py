@@ -177,16 +177,19 @@ class BenchStarter(HelperMixin):
                 if container.status in ("exited", "stopped"):
                     container.start()
                     self._log(f"Started container {bench_name}")
+                    return "STARTED"
+                elif container.status in ("running", "restarting"):
+                    self._log(f"Container {bench_name} already running/restarting")
+                    return "ALREADY_RUNNING"
 
-            return True
         except docker.errors.NotFound:
             self._log(f"Container {bench_name} not found")
         except Timeout:
-            self._log(f"Could not acquire lock for {bench_name}, skipping")
+            self._log(f"Could not acquire lock for {bench_name}, skipping starting it")
         except Exception as e:
             self._log(f"Failed to start container {bench_name}: {e}")
 
-        return False
+        return "NOT_STARTED"
 
     def _get_pending_benches(self):
         """Get list of benches waiting to be started from Redis list."""
@@ -252,18 +255,19 @@ class BenchStarter(HelperMixin):
             # Check if we can start this bench
             can_start, info = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)
             if can_start:
-                if self._start_container(bench_name):
-                    # reduce the available memory
-                    available_memory = available_memory - required_memory_by_bench
+                status = self._start_container(bench_name)
+                if status == "NOT_STARTED":
+                    # dont throttle for non-memory related stuff
+                    throttle = False
+                    info = "Please try to queue again and/or contact support."
+                    self._remove_and_add_failed_status(bench_name, info, throttle)
+                else:
+                    if status == "STARTED":
+                        # reduce the available memory
+                        available_memory = available_memory - required_memory_by_bench
                     self._remove_from_queue(bench_name)
-                    continue
-
-                # dont throttle for non-memory related stuff
-                throttle = False
-                info = "Please try to queue again and/or contact support."
-
-            self._remove_and_add_failed_status(bench_name, info, throttle)
-            self._log(f"Cannot start {bench_name}: {info}")
+            else:
+                self._remove_and_add_failed_status(bench_name, info, throttle)
 
     def start(self):
         """Start the bench starter service."""

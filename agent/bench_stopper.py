@@ -152,7 +152,7 @@ class BenchStopper(HelperMixin):
         try:
             # Get container stats from cAdvisor
             response = requests.get( f"{Config.cadvisor_endpoint}/{container.id}", timeout=15)
-            if response.status_code != 200:
+            if not response.ok:
                 self._log(f"cAdvisor request failed with status {response.status_code}")
                 return None, None
 
