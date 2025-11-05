@@ -35,10 +35,12 @@ class BenchStarter(HelperMixin):
             self._init_redis_client()
 
         # TODO: add an enum for status
-        status = "THROTTLED"
-        if ignore_throttle or not self.redis_client.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "throttle"):
-            added = self.redis_client.zadd(Config.redis_queue_key, {bench_name: time.time()}, nx=True)
-            status = "QUEUED" if added else "REQUEST_ALREADY_EXISTS"
+        status = "REQUEST_ALREADY_EXISTS"
+        if not self.redis_client.zscore(Config.redis_queue_key, bench_name): # we do this to ensure correctness
+            status = "THROTTLED"
+            if ignore_throttle or not self.redis_client.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "throttle"):
+                added = self.redis_client.zadd(Config.redis_queue_key, {bench_name: time.time()}, nx=True)
+                status = "QUEUED" if added else "REQUEST_ALREADY_EXISTS"
 
         return status
 
