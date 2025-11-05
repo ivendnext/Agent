@@ -20,7 +20,7 @@ class Config:
     batch_size: int = 5
     activity_threshold_hours: float = 0.5  # Consider container active if accessed within last 30 mins (for mem adjustment)
     min_uptime_hours: float = 0.25 # Minimum uptime (15 mins) before checking activity logs (for mem adjustment)
-    available_memory_adjustment_percent: float = 20.0  # Max 20% of available memory for adjustments
+    available_memory_adjustment_percent: float = 40.0  # Max 40% of available memory for adjustments
 
 
 class BenchStarter(HelperMixin):
@@ -235,8 +235,11 @@ class BenchStarter(HelperMixin):
 
             # Get memory state
             min_available_threshold = self._get_memory_threshold()
-            # TODO: dont adjust if available mem is anyway below threshold
-            available_memory = self._get_adjusted_available_memory()
+            available_memory = self._get_system_memory_info()["available_effective_bytes"]
+
+            # adjust if available mem is above threshold
+            if available_memory > min_available_threshold:
+                available_memory = self._get_adjusted_available_memory()
 
         for bench_name in pending_benches:
             if not self.running:
