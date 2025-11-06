@@ -1,6 +1,4 @@
-import os
 import time
-import json
 import psutil
 from filelock import FileLock, Timeout
 
@@ -22,7 +20,7 @@ class Config:
     batch_size: int = 5
     activity_threshold_hours: float = 0.5  # Consider container active if accessed within last 30 mins (for mem adjustment)
     min_uptime_hours: float = 0.25 # Minimum uptime (15 mins) before checking activity logs (for mem adjustment)
-    available_memory_adjustment_percent: float = 20.0  # Max 20% of available memory for adjustments
+    available_memory_adjustment_percent: float = 40.0  # Max 40% of available memory for adjustments
 
 
 class BenchStarter(HelperMixin):
@@ -38,12 +36,11 @@ class BenchStarter(HelperMixin):
 
         # TODO: add an enum for status
         status = "REQUEST_ALREADY_EXISTS"
-        queue_items = self.redis_client.lrange(Config.redis_queue_key, 0, -1)
-        if bench_name not in queue_items:
+        if not self.redis_client.zscore(Config.redis_queue_key, bench_name): # we do this to ensure correctness
             status = "THROTTLED"
             if ignore_throttle or not self.redis_client.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "throttle"):
-                self.redis_client.rpush(Config.redis_queue_key, bench_name)
-                status = "QUEUED"
+                added = self.redis_client.zadd(Config.redis_queue_key, {bench_name: time.time()}, nx=True)
+                status = "QUEUED" if added else "REQUEST_ALREADY_EXISTS"
 
         return status
 
@@ -194,25 +191,24 @@ class BenchStarter(HelperMixin):
     def _get_pending_benches(self):
         """Get list of benches waiting to be started from Redis list."""
         try:
-            # Get items from list (FIFO order)
-            pending_items = self.redis_client.lrange(
+            # Get items from sorted set (based on ascending score)
+            pending_items = self.redis_client.zrange(
                 Config.redis_queue_key,
                 0,
                 Config.batch_size - 1  # Get only batch_size items
             )
 
-            # remove duplicates (if any) while preserving order
-            return list(dict.fromkeys([item.strip() for item in pending_items]))
+            return [item.strip() for item in pending_items]
         except Exception as e:
             self._log(f"Error getting pending benches from Redis: {e}")
 
         return []
 
     def _remove_from_queue(self, bench_name, pipe=None):
-        """Remove bench from the Redis queue."""
+        """Remove bench from the set."""
         try:
             client = pipe or self.redis_client
-            client.lrem(Config.redis_queue_key, 1, bench_name)
+            client.zrem(Config.redis_queue_key, bench_name)
         except Exception as e:
             self._log(f"Error removing {bench_name} from start queue: {e}")
 
@@ -241,8 +237,11 @@ class BenchStarter(HelperMixin):
 
             # Get memory state
             min_available_threshold = self._get_memory_threshold()
-            # TODO: dont adjust if available mem is anyway below threshold
-            available_memory = self._get_adjusted_available_memory()
+            available_memory = self._get_system_memory_info()["available_effective_bytes"]
+
+            # adjust if available mem is above threshold
+            if available_memory > min_available_threshold:
+                available_memory = self._get_adjusted_available_memory()
 
         for bench_name in pending_benches:
             if not self.running:
