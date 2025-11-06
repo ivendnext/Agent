@@ -1826,8 +1826,7 @@ def bench_status(bench_name):
 
     if container.status in ("exited", "stopped"):
         redis_instance = redis.Redis(port=Server().config["redis_port"], decode_responses=True)
-        queue_items = redis_instance.lrange(Config.redis_queue_key, 0, -1)
-        if bench_name in queue_items:
+        if redis_instance.zscore(Config.redis_queue_key, bench_name):
             return (
                 render_template(
                     "web/web.html", title=title, message=(message + "\nRequest for the bench to start is enqueued.")
