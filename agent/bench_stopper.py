@@ -13,7 +13,6 @@ from filelock import FileLock, Timeout
 
 class HelperMixin:
     def _setup_signal_handlers(self):
-        """Setup graceful shutdown handlers."""
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
 
@@ -34,7 +33,7 @@ class HelperMixin:
     def _load_memory_stats(self, stats_file):
         """Load memory stats from the stats file."""
         try:
-            with FileLock("/tmp/mem_stats.lock"):
+            with FileLock("/tmp/bench_mem_stats.lock"):
                 if os.path.exists(stats_file):
                     with open(stats_file, 'r') as f:
                         return json.load(f)
@@ -129,9 +128,9 @@ class HelperMixin:
 class Config:
     check_interval_minutes: int = 15
     # this is the min uptime the container should have to start looking at the activity logs (for stopping the container(s) - assume them to be active if uptime less than this time)
-    min_uptime_hours: float = 2.0
+    min_uptime_hours: float = 1.0
     # this is the max inactivity time for which if the container has not been accessed, it can be stopped
-    inactive_threshold_hours: float = 3.0
+    inactive_threshold_hours: float = 2.0
     # this is the min uptime the container should have to start looking at the activity logs for mem stats updation (assume container(s) to be active if uptime less than this time)
     mem_stats_min_uptime_hours: float = 0.5
     # Only update mem stats for recently active containers (accessed within last hour)
@@ -151,7 +150,7 @@ class BenchStopper(HelperMixin):
     def _get_cadvisor_memory_stats(self, container):
         try:
             # Get container stats from cAdvisor
-            response = requests.get( f"{Config.cadvisor_endpoint}/{container.id}", timeout=15)
+            response = requests.get(f"{Config.cadvisor_endpoint}/{container.id}", timeout=15)
             if not response.ok:
                 self._log(f"cAdvisor request failed with status {response.status_code}")
                 return None, None
@@ -180,14 +179,11 @@ class BenchStopper(HelperMixin):
     def _calculate_memory_average(self, container_name, current_memory, max_memory):
         # Calculate average of current and max memory
         session_average = (current_memory + max_memory) // 2
+        final_average = session_average
 
         # Get previous average if it exists
         if previous_average := self.mem_stats.get(container_name):
-            # Average the session average with the previous average
             final_average = (session_average + previous_average) // 2
-        else:
-            # No previous data, use session average
-            final_average = session_average
 
         return final_average
 
@@ -234,7 +230,7 @@ class BenchStopper(HelperMixin):
         if not self.mem_stats:
             return
 
-        with FileLock("/tmp/mem_stats.lock"):
+        with FileLock("/tmp/bench_mem_stats.lock"):
             with open(Config.stats_file, 'w') as f:
                 json.dump(self.mem_stats, f, indent=2)
 
@@ -242,10 +238,8 @@ class BenchStopper(HelperMixin):
         self.mem_stats = None
 
     def start(self):
-        """Start the monitoring service."""
         retries = 3
         self.running = True
-
         while self.running:
             try:
                 self.sleeping = True

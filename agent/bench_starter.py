@@ -14,19 +14,20 @@ class Config:
     redis_failed_hash_key: str = "bench_start_failed"
     redis_failed_hash_expiry_mins: int = 10
     check_interval_seconds: int = 60
-    memory_reserve_percent: float = 35.0  # Reserve 35% of system memory
+    memory_reserve_percent: float = 35.0  # Reserve system memory
     memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
-    activity_threshold_hours: float = 0.5  # Consider container active if accessed within last 30 mins (for mem adjustment)
-    min_uptime_hours: float = 0.25 # Minimum uptime (15 mins) before checking activity logs (for mem adjustment)
-    available_memory_adjustment_percent: float = 40.0  # Max 40% of available memory for adjustments
+    activity_threshold_hours: float = 0.5  # Consider container active if accessed within last x hrs (for mem adjustment)
+    min_uptime_hours: float = 0.25 # Minimum uptime before checking activity logs (for mem adjustment)
+    available_memory_adjustment_percent: float = 30.0  # Max percent of available memory to adjust based on running containers
 
 
 class BenchStarter(HelperMixin):
     def __init__(self):
         self.redis_client = None
         self.docker_client = None
+        self.mem_stats = None
         self.running = False
         self.sleeping = False
 
@@ -34,9 +35,12 @@ class BenchStarter(HelperMixin):
         if not self.redis_client:
             self._init_redis_client()
 
-        # TODO: add an enum for status
+        # NOTE: Small race condition exists between checks and add.
+        # Using nx=True prevents duplicates in queue/set, but item might
+        # be added after being removed. It should be okay for the most part.
+
         status = "REQUEST_ALREADY_EXISTS"
-        if not self.redis_client.zscore(Config.redis_queue_key, bench_name): # we do this to ensure correctness
+        if not self.redis_client.zscore(Config.redis_queue_key, bench_name):
             status = "THROTTLED"
             if ignore_throttle or not self.redis_client.hget(f"{Config.redis_failed_hash_key}:{bench_name}", "throttle"):
                 added = self.redis_client.zadd(Config.redis_queue_key, {bench_name: time.time()}, nx=True)
@@ -100,10 +104,8 @@ class BenchStarter(HelperMixin):
                 # Container not running or can't get stats
                 return 0
 
-            avg = self.mem_stats[bench.name]
-
             # underestimation (how much more memory container uses than current)
-            return max(0, avg - current_usage)
+            return max(0, self.mem_stats[bench.name] - current_usage)
 
         except Exception as e:
             self._log(f"Error calculating memory adjustment for {bench.name}: {e}")
@@ -122,7 +124,7 @@ class BenchStarter(HelperMixin):
 
         available_memory = self._get_system_memory_info()["available_effective_bytes"]
         max_adjustment = int(available_memory * (Config.available_memory_adjustment_percent / 100))
-        if total_adjustment >= max_adjustment:
+        if total_adjustment > max_adjustment:
             total_adjustment = max_adjustment
 
         return available_memory - total_adjustment
@@ -153,7 +155,9 @@ class BenchStarter(HelperMixin):
             total_bg_workers = 3 * background_workers
 
         total_workers = gunicorn_workers + total_bg_workers
-        return Config.worker_memory_mb * total_workers * 1024 * 1024
+        estimated_memory = total_workers * Config.worker_memory_mb
+        self._log(f"Estimated memory for {bench_name} based on config: {estimated_memory}MB")
+        return estimated_memory * 1024 * 1024
 
     def _can_start_bench(self, available_memory, min_available_threshold, required_memory_by_bench):
         # Check if current available memory is already below threshold
@@ -169,8 +173,8 @@ class BenchStarter(HelperMixin):
 
     def _start_container(self, bench_name):
         try:
+            container = self.docker_client.containers.get(bench_name)
             with FileLock(f"/tmp/{bench_name}.lock", timeout=60):
-                container = self.docker_client.containers.get(bench_name)
                 if container.status in ("exited", "stopped"):
                     container.start()
                     self._log(f"Started container {bench_name}")
@@ -179,6 +183,7 @@ class BenchStarter(HelperMixin):
                     self._log(f"Container {bench_name} already running/restarting")
                     return "ALREADY_RUNNING"
 
+            self._log(f"Unable to start {bench_name}, unknown container status: {container.status}")
         except docker.errors.NotFound:
             self._log(f"Container {bench_name} not found")
         except Timeout:
@@ -195,7 +200,7 @@ class BenchStarter(HelperMixin):
             pending_items = self.redis_client.zrange(
                 Config.redis_queue_key,
                 0,
-                Config.batch_size - 1  # Get only batch_size items
+                Config.batch_size - 1
             )
 
             return [item.strip() for item in pending_items]
@@ -224,7 +229,6 @@ class BenchStarter(HelperMixin):
                 pipe.hset(failed_key, mapping={'info': info, 'throttle': int(throttle)})
                 pipe.expire(failed_key, Config.redis_failed_hash_expiry_mins * 60) # set expiry
 
-                # Execute all commands atomically
                 pipe.execute()
         except Exception as e:
             self._log(f"Error moving {bench_name} to failed queue: {e}")
@@ -235,13 +239,16 @@ class BenchStarter(HelperMixin):
         if pending_benches:
             self.mem_stats = self._load_memory_stats(Config.memory_stats_file)
 
-            # Get memory state
             min_available_threshold = self._get_memory_threshold()
             available_memory = self._get_system_memory_info()["available_effective_bytes"]
 
             # adjust if available mem is above threshold
             if available_memory > min_available_threshold:
                 available_memory = self._get_adjusted_available_memory()
+
+            self._log(f"""
+                Available Memory (after adjustment if any): {available_memory/(1024*1024)}MB, Minimum Threshold: {min_available_threshold/(1024*1024)}MB
+            """)
 
         for bench_name in pending_benches:
             if not self.running:
@@ -251,7 +258,6 @@ class BenchStarter(HelperMixin):
             required_memory_by_bench = self._calculate_bench_memory_requirement(bench_name)
 
             throttle = True
-            # Check if we can start this bench
             can_start, info = self._can_start_bench(available_memory, min_available_threshold, required_memory_by_bench)
             if can_start:
                 status = self._start_container(bench_name)
@@ -269,7 +275,6 @@ class BenchStarter(HelperMixin):
                 self._remove_and_add_failed_status(bench_name, info, throttle)
 
     def start(self):
-        """Start the bench starter service."""
         self._setup_signal_handlers()
 
         retries = 3
