@@ -93,24 +93,14 @@ log = logging.getLogger("werkzeug")
 log.handlers = []
 
 
-def skip_auth(func):
-    func._skip_auth = True
-    return func
-
-
 @application.before_request
 def validate_access_token():
-    exempt_endpoints = ["get_metrics"]
+    exempt_endpoints = ["get_metrics", "bench_start", "bench_status"]
     if request.endpoint in exempt_endpoints:
         return None
 
     try:
         if application.debug:
-            return None
-
-        # Skip validation for endpoints marked with @skip_auth
-        view_func = application.view_functions.get(request.endpoint)
-        if view_func and getattr(view_func, "_skip_auth", False):
             return None
 
         method, access_token = request.headers["Authorization"].split(" ")
@@ -1773,7 +1763,6 @@ def destroy_devbox(devbox_name: str):
 
 
 @application.route("/bench-start/<string:bench_name>")
-@skip_auth
 def bench_start(bench_name):
     try:
         client = docker.from_env()
@@ -1806,7 +1795,6 @@ def bench_start(bench_name):
     return render_template("web/web.html", title=title, message=message), status
 
 @application.route("/bench-status/<string:bench_name>")
-@skip_auth
 def bench_status(bench_name):
     try:
         client = docker.from_env()
