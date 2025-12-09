@@ -1082,8 +1082,8 @@ class Server(Base):
                 "nginx_vts_module_enabled": self.config.get("nginx_vts_module_enabled", True),
                 "ip_whitelist": self.config.get("ip_whitelist", []),
                 "allow_sleepy_containers": self.allow_sleepy_containers,
-                # "use_shared": self.config.get("benches_directory") == "/shared",
-                "conf_directory": os.path.join(self.config.get("benches_directory"), "*", "nginx.conf"),
+                "use_shared": self.config.get("benches_directory") == "/shared",
+                # "conf_directory": os.path.join(self.config.get("benches_directory"), "*", "nginx.conf"),
             },
             nginx_config,
         )
