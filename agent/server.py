@@ -133,7 +133,6 @@ class Server(Base):
         common_site_config,
         registry,
         mounts=None,
-        redis_password=None,
     ):
         self.docker_login(registry)
         self.bench_init(name, bench_config, registry)
