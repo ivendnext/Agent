@@ -10,6 +10,7 @@ import tempfile
 import time
 from contextlib import suppress
 from datetime import datetime
+from urllib.parse import urlparse
 
 from jinja2 import Environment, PackageLoader
 from passlib.hash import pbkdf2_sha256 as pbkdf2
@@ -124,40 +125,6 @@ class Server(Base):
             "config": self.config,
         }
 
-    def update_redis_password(self, bench: Bench, redis_password: str) -> None:
-        """Updates redis-cache and redis-queue with agent stored hash"""
-        redis_cache_conf = os.path.join(bench.config_directory, "redis-cache.conf")
-        redis_queue_conf = os.path.join(bench.config_directory, "redis-queue.conf")
-
-        requirepass_line = f"requirepass {redis_password}\n"
-
-        for conf_file in [redis_cache_conf, redis_queue_conf]:
-            with open(conf_file, "r") as f:
-                lines = f.readlines()
-
-            has_requirepass = any(line.strip().startswith("requirepass") for line in lines)
-
-            if not has_requirepass:
-                lines.append(requirepass_line)
-
-                with open(conf_file, "w") as f:
-                    f.writelines(lines)
-
-    @job("Set Redis Password", priority="high")
-    def set_redis_password(self, redis_password: str):
-        """Set redis password for existing benches"""
-        return self._set_redis_password(redis_password)
-
-    @step("Set Redis Password")
-    def _set_redis_password(self, redis_password: str):
-        for _, bench in self.benches.items():
-            for port in ("11000", "13000"):  # for cache and queue
-                bench.docker_execute(
-                    f"redis-cli --raw -p {port} CONFIG SET requirepass '{redis_password}' "
-                    f"&& redis-cli --raw -p {port} -a '{redis_password}' CONFIG SET protected-mode no "
-                    f"&& redis-cli --raw -p {port} -a '{redis_password}' CONFIG REWRITE"
-                )
-
     @job("New Bench", priority="low")
     def new_bench(
         self,
@@ -165,13 +132,14 @@ class Server(Base):
         bench_config,
         common_site_config,
         registry,
-        redis_password: str | None = None,
         mounts=None,
+        redis_password=None,
     ):
         self.docker_login(registry)
         self.bench_init(name, bench_config, registry)
         bench = Bench(name, self, mounts=mounts)
         bench.update_config(common_site_config, bench_config)
+        # TODO : Mnually added redis_password in input arguments its should be check 
         if redis_password:
             self.update_redis_password(bench, redis_password)
         if bench.bench_config.get("single_container") and not bench.for_devbox:
@@ -264,7 +232,6 @@ class Server(Base):
         directory: str,
         is_primary: bool,
         secondary_server_private_ip: str,
-        redis_password: str,
         redis_connection_string_ip: str,
         restart_benches: bool = True,
         registry_settings: dict | None = None,
@@ -275,35 +242,41 @@ class Server(Base):
         self.update_bench_nginx_config()
         self._reload_nginx()
 
-        self._update_site_config_with_new_rq_conf(
-            redis_connection_string_ip, redis_password
-        )  # Update common site config
+        self._update_site_config_with_new_rq_conf(redis_connection_string_ip)
 
         if restart_benches:
             # We will only start with secondary server private IP if this is a secondary server
             self.restart_benches(
                 is_primary=is_primary,
                 registry_settings=registry_settings,
-                redis_password=redis_password,
                 secondary_server_private_ip=secondary_server_private_ip if not is_primary else None,
             )
 
     @step("Configure Site with Redis Private IP")
-    def _update_site_config_with_new_rq_conf(self, private_ip: str, redis_password: str):
+    def _update_site_config_with_new_rq_conf(self, private_ip: str):
         for _, bench in self.benches.items():
             common_site_config = bench.get_config(for_update=True)
 
             for key in ("redis_cache", "redis_queue", "redis_socketio"):
+                offset = 18000 - bench.bench_config["web_port"]
+                rq_cache_port = 13000 + offset
+
                 if private_ip != "localhost":
                     port = (
                         bench.bench_config["rq_port"]
                         if key == "redis_queue"
-                        else bench.bench_config["rq_cache_port"]
+                        else bench.bench_config.get("rq_cache_port") or rq_cache_port
                     )
                 else:
                     port = 11000 if key == "redis_queue" else 13000
 
-                updated_connection_string = f"redis://:{redis_password}@{private_ip}:{port}"
+                old_connection_string = urlparse(common_site_config[key])
+                # We should have the password by now, if we don't then press will handle
+                updated_connection_string = (
+                    f"redis://:{old_connection_string.password}@{private_ip}:{port}"
+                    if old_connection_string.password
+                    else f"redis://{private_ip}:{port}"
+                )
                 common_site_config.update({key: updated_connection_string})
 
             bench.set_config(common_site_config)
@@ -330,14 +303,13 @@ class Server(Base):
         self,
         is_primary: bool,
         secondary_server_private_ip: str,
-        redis_password: str,
         registry_settings: dict[str, str],
     ):
         if not is_primary:
             # Don't need to pull images on primary server
             self.docker_login(registry_settings)
         for _, bench in self.benches.items():
-            self.update_redis_password(bench, redis_password)  # Update redis conf files
+            bench.generate_supervisor_config()  # Should set gunicorn access log if it does not exist
             bench.start(secondary_server_private_ip=secondary_server_private_ip)
 
     @job("Stop Bench Workers")
@@ -719,46 +691,24 @@ class Server(Base):
         self.update_config({"proxysql_admin_password": password})
 
     @job("Add Servers to ACL")
-    def add_to_acl(
-        self,
-        primary_server_private_ip: str,
-        secondary_server_private_ip: str,
-        shared_directory: bool,
-    ) -> None:
-        return self._add_to_acl(
-            primary_server_private_ip,
-            secondary_server_private_ip,
-            shared_directory,
-        )
+    def add_to_acl(self, secondary_server_private_ip: str) -> None:
+        return self._add_to_acl(secondary_server_private_ip)
 
     @step("Add Servers to ACL")
-    def _add_to_acl(
-        self,
-        primary_server_private_ip: str,
-        secondary_server_private_ip: str,
-        shared_directory: str,
-    ):
+    def _add_to_acl(self, secondary_server_private_ip: str):
         nfs_handler = NFSHandler(self)
         return nfs_handler.add_to_acl(
-            primary_server_private_ip=primary_server_private_ip,
             secondary_server_private_ip=secondary_server_private_ip,
-            shared_directory=shared_directory,
         )
 
     @job("Remove Server from ACL")
-    def remove_from_acl(
-        self, shared_directory: str, primary_server_private_ip: str, secondary_server_private_ip: str
-    ) -> None:
-        return self._remove_from_acl(shared_directory, primary_server_private_ip, secondary_server_private_ip)
+    def remove_from_acl(self, secondary_server_private_ip: str) -> None:
+        return self._remove_from_acl(secondary_server_private_ip)
 
     @step("Remove Server from ACL")
-    def _remove_from_acl(
-        self, shared_directory: str, primary_server_private_ip: str, secondary_server_private_ip: str
-    ):
+    def _remove_from_acl(self, secondary_server_private_ip: str):
         nfs_handler = NFSHandler(self)
         return nfs_handler.remove_from_acl(
-            shared_directory=shared_directory,
-            primary_server_private_ip=primary_server_private_ip,
             secondary_server_private_ip=secondary_server_private_ip,
         )
 
@@ -870,7 +820,7 @@ class Server(Base):
         skip_patches=False,
     ):
         directory = os.path.join(self.directory, "repo")
-        if skip_repo_setup:
+        if not skip_repo_setup:
             self.execute("git reset --hard", directory=directory)
             self.execute("git clean -fd", directory=directory)
             self.execute("git fetch upstream", directory=directory)
@@ -904,8 +854,14 @@ class Server(Base):
         if restart_redis or supervisor_status.get("redis") != "RUNNING":
             self.execute("sudo supervisorctl start agent:redis")
 
-        # Start NGINX Reload Manager if it's a proxy server
         if is_proxy_server:
+            from agent.proxy import Proxy
+
+            # Call proxy setup to re-generate configuration
+            proxy = Proxy()
+            proxy.setup_proxy()
+
+            # Start NGINX Reload Manager if it's a proxy server
             self.execute("sudo supervisorctl start agent:nginx_reload_manager")
 
         if restart_rq_workers:
@@ -1126,7 +1082,8 @@ class Server(Base):
                 "nginx_vts_module_enabled": self.config.get("nginx_vts_module_enabled", True),
                 "ip_whitelist": self.config.get("ip_whitelist", []),
                 "allow_sleepy_containers": self.allow_sleepy_containers,
-                "use_shared": self.config.get("benches_directory") == "/shared",
+                # "use_shared": self.config.get("benches_directory") == "/shared",
+                "conf_directory": os.path.join(self.config.get("benches_directory"), "*", "nginx.conf"),
             },
             nginx_config,
         )
@@ -1177,6 +1134,9 @@ class Server(Base):
         }
         if self.config.get("name").startswith("n") or "proxy" in self.config.get("name"):
             data["is_proxy_server"] = True
+
+        if self.config.get("name", "").startswith("fs"):
+            data["is_secondary"] = True
 
         self._render_template(
             "agent/supervisor.conf.jinja2",
