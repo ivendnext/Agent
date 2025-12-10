@@ -15,7 +15,7 @@ class Config:
     redis_failed_hash_expiry_mins: int = 10
     check_interval_seconds: int = 60
     memory_reserve_percent: float = 35.0  # Reserve system memory
-    memory_stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
+    memory_stats_file: str = "/home/ivend/agent/bench-memory-stats.json"
     worker_memory_mb: int = 100  # this is an estimate
     batch_size: int = 5
     activity_threshold_hours: float = 0.5  # Consider container active if accessed within last x hrs (for mem adjustment)

@@ -4,7 +4,7 @@ services:
     image: {{ docker_image }}
     command:
       [
-        "/home/frappe/frappe-bench/env/bin/gunicorn",
+        "/home/ivend/ivend-bench/env/bin/gunicorn",
         "--bind",
         "0.0.0.0:8000",
         "--timeout",
@@ -16,35 +16,35 @@ services:
         "--preload",
         "frappe.app:application",
       ]
-    working_dir: /home/frappe/frappe-bench/sites
+    working_dir: /home/ivend/ivend-bench/sites
     ports:
       - "{{ web_port }}:8000"
     volumes:
-      - logs:/home/frappe/frappe-bench/logs:rw
-      - sites:/home/frappe/frappe-bench/sites:rw
+      - logs:/home/ivend/ivend-bench/logs:rw
+      - sites:/home/ivend/ivend-bench/sites:rw
     depends_on:
       - redis-cache
       - redis-queue
       - redis-socketio
   socketio:
     image: {{ docker_image }}
-    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
-    working_dir: /home/frappe/frappe-bench
+    command: ["node", "/home/ivend/ivend-bench/apps/frappe/socketio.js"]
+    working_dir: /home/ivend/ivend-bench
     ports:
       - "{{ socketio_port }}:9000"
     volumes:
-      - logs:/home/frappe/frappe-bench/logs:rw
-      - sites:/home/frappe/frappe-bench/sites:ro
+      - logs:/home/ivend/ivend-bench/logs:rw
+      - sites:/home/ivend/ivend-bench/sites:ro
     depends_on:
       - redis-socketio
       - web
   scheduler:
     image: {{ docker_image }}
     command: ["bench", "schedule"]
-    working_dir: /home/frappe/frappe-bench
+    working_dir: /home/ivend/ivend-bench
     volumes:
-      - sites:/home/frappe/frappe-bench/sites:rw
-      - logs:/home/frappe/frappe-bench/logs:rw
+      - sites:/home/ivend/ivend-bench/sites:rw
+      - logs:/home/ivend/ivend-bench/logs:rw
     depends_on:
       - redis-cache
       - redis-queue
@@ -52,10 +52,10 @@ services:
   worker_default:
     image: {{ docker_image }}
     command: ["bench", "worker", "--queue", "default"]
-    working_dir: /home/frappe/frappe-bench
+    working_dir: /home/ivend/ivend-bench
     volumes:
-      - sites:/home/frappe/frappe-bench/sites:rw
-      - logs:/home/frappe/frappe-bench/logs:rw
+      - sites:/home/ivend/ivend-bench/sites:rw
+      - logs:/home/ivend/ivend-bench/logs:rw
     depends_on:
       - redis-cache
       - redis-queue
@@ -65,10 +65,10 @@ services:
   worker_short:
     image: {{ docker_image }}
     command: ["bench", "worker", "--queue", "short"]
-    working_dir: /home/frappe/frappe-bench
+    working_dir: /home/ivend/ivend-bench
     volumes:
-      - sites:/home/frappe/frappe-bench/sites:rw
-      - logs:/home/frappe/frappe-bench/logs:rw
+      - sites:/home/ivend/ivend-bench/sites:rw
+      - logs:/home/ivend/ivend-bench/logs:rw
     depends_on:
       - redis-cache
       - redis-queue
@@ -78,10 +78,10 @@ services:
   worker_long:
     image: {{ docker_image }}
     command: ["bench", "worker", "--queue", "long"]
-    working_dir: /home/frappe/frappe-bench
+    working_dir: /home/ivend/ivend-bench
     volumes:
-      - sites:/home/frappe/frappe-bench/sites:rw
-      - logs:/home/frappe/frappe-bench/logs:rw
+      - sites:/home/ivend/ivend-bench/sites:rw
+      - logs:/home/ivend/ivend-bench/logs:rw
     depends_on:
       - redis-cache
       - redis-queue

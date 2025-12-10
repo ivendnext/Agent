@@ -148,7 +148,7 @@ POST /benches
     "config": {
         "background_workers": 8,
         "error_report_email": "test@example.com",
-        "frappe_user": "frappe",
+        "frappe_user": "ivend",
         "gunicorn_workers": 16,
         "mail_login": "test@example.com",
         "mail_password": "test",
@@ -317,7 +317,7 @@ def add_to_acl():
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
         shared_directory=data.get("shared_directory"),
     )
-    return {"shared_directory": f"/home/frappe/nfs/{data.get('private_ip')}"}
+    return {"shared_directory": f"/home/ivend/nfs/{data.get('private_ip')}"}
 
 
 @application.route("/nfs/remove-from-acl", methods=["POST"])
@@ -328,7 +328,7 @@ def remove_from_acl():
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
         shared_directory=data.get("shared_directory"),
     )
-    return {"shared_directory": f"/home/frappe/nfs/{data.get('private_ip')}"}
+    return {"shared_directory": f"/home/ivend/nfs/{data.get('private_ip')}"}
 
 
 @application.route("/nfs/share-sites", methods=["POST"])

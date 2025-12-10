@@ -69,7 +69,7 @@ def ping_server(password: str):
 
 @setup.command()
 @click.option("--name", required=True)
-@click.option("--user", default="frappe")
+@click.option("--user", default="ivend")
 @click.option("--workers", required=True, type=int)
 @click.option("--proxy-ip", required=False, type=str, default=None)
 @click.option("--sentry-dsn", required=False, type=str)
@@ -103,7 +103,7 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, allow_sleepy_con
 
 @setup.command()
 def pyspy():
-    privileges_line = "frappe ALL = (root) NOPASSWD: /home/frappe/agent/env/bin/py-spy"
+    privileges_line = "frappe ALL = (root) NOPASSWD: /home/ivend/agent/env/bin/py-spy"
     with open("/etc/sudoers.d/frappe", "a+") as sudoers:
         sudoers.seek(0)
         lines = sudoers.read().splitlines()
@@ -380,7 +380,7 @@ def get_config_dir(config_path: str | None = None) -> str | None:
         config_dir = config_dir.parent
 
     potential = [
-        Path("/home/frappe/agent/config.json"),
+        Path("/home/ivend/agent/config.json"),
         config_dir / "config.json",
         config_dir / ".." / "config.json",
     ]

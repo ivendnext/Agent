@@ -177,7 +177,7 @@ class Bench(Base):
     def docker_execute(self, command, input=None, subdir=None, non_zero_throw=True, as_root: bool = False):
         interactive = "-i" if input else ""
         as_root = "-u root" if as_root else ""
-        workdir = "/home/frappe/frappe-bench"
+        workdir = "/home/ivend/ivend-bench"
         if subdir:
             workdir = os.path.join(workdir, subdir)
 
@@ -682,7 +682,7 @@ class Bench(Base):
             self.docker_execute("supervisorctl start code-server:")
 
         self.docker_execute(
-            f"sed -i 's/^password:.*/password: {password}/' /home/frappe/.config/code-server/config.yaml"
+            f"sed -i 's/^password:.*/password: {password}/' /home/ivend/.config/code-server/config.yaml"
         )
         self.docker_execute("supervisorctl restart code-server:")
 
@@ -727,8 +727,8 @@ class Bench(Base):
 
             if not mp["is_absolute_path"]:
                 """
-                self.server.benches_directory = /home/frappe/benches (Host)
-                bench_directory = "/home/frappe/frappe-bench" (container)
+                self.server.benches_directory = /home/ivend/benches (Host)
+                bench_directory = "/home/ivend/ivend-bench" (container)
                 """
                 host_path = os.path.join(self.server.benches_directory, mp["source"])
                 destination_path = os.path.join(bench_directory, mp["destination"])
@@ -761,14 +761,14 @@ class Bench(Base):
 
             rq_port_mapping = f"-p 0.0.0.0:{rq_port}:11000 "  # need to expose to secondary server
 
-            bench_directory = "/home/frappe/frappe-bench"
+            bench_directory = "/home/ivend/ivend-bench"
             mounts = self.prepare_mounts_on_host(bench_directory)
             # if self.for_devbox:
             #     # to ensure app changes dont just vanish
             #     mounts += f"-v {self.apps_directory}:{bench_directory}/apps "
 
             command = (
-                "docker run -d --init -u frappe "
+                "docker run -d --init -u ivend "
                 f"--restart {restart_policy} --hostname {self.name} "
                 "--security-opt seccomp=unconfined "
                 f"-p 127.0.0.1:{self.bench_config['web_port']}:8000 "
@@ -962,7 +962,7 @@ class Bench(Base):
         patch_dir = Path(os.path.join(self.directory, *relative))
         patch_dir.mkdir(parents=True, exist_ok=True)
 
-        bench_container_dir = "/home/frappe/frappe-bench"
+        bench_container_dir = "/home/ivend/ivend-bench"
         patch_container_dir = os.path.join(bench_container_dir, *relative, filename)
 
         patch_path = patch_dir / filename

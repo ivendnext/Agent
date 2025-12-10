@@ -135,7 +135,7 @@ class Config:
     mem_stats_min_uptime_hours: float = 0.5
     # Only update mem stats for recently active containers (accessed within last hour)
     mem_stats_activity_threshold_hours: float = 1.0
-    stats_file: str = "/home/frappe/agent/bench-memory-stats.json"
+    stats_file: str = "/home/ivend/agent/bench-memory-stats.json"
     cadvisor_endpoint: str = "http://127.0.0.1:9338/api/v1.3/docker"
 
 

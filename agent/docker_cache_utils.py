@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 def copy_file_from_docker_cache(
     container_source: str,
     host_dest: str = ".",
-    cache_target: str = "/home/frappe/.cache",
+    cache_target: str = "/home/ivend/.cache",
 ) -> CommandOutput:
     """
     Function is used to copy files from docker cache i.e. `cache_target/container_source`
@@ -69,7 +69,7 @@ def copy_file_from_docker_cache(
 
 def run_command_in_docker_cache(
     command: str = "ls -A",
-    cache_target: str = "/home/frappe/.cache",
+    cache_target: str = "/home/ivend/.cache",
     remove_image: bool = True,
 ) -> CommandOutput:
     """
@@ -233,7 +233,7 @@ def strip_build_output(stdout: str) -> str:
 def get_cached_apps() -> dict[str, list[str]]:
     result = run_command_in_docker_cache(
         command="ls -A bench/apps",
-        cache_target="/home/frappe/.cache",
+        cache_target="/home/ivend/.cache",
     )
 
     apps = dict()

@@ -103,7 +103,7 @@ class Server(Base):
         config_directory = os.path.join(bench_directory, "config")
         command = (
             "docker run --rm --net none "
-            f"-v {config_directory}:/home/frappe/frappe-bench/configmount "
+            f"-v {config_directory}:/home/ivend/ivend-bench/configmount "
             f"{config['docker_image']} cp -LR config/. configmount"
         )
         self.execute(command, directory=bench_directory)
@@ -112,7 +112,7 @@ class Server(Base):
         # Copy sites directory from image to host system
         command = (
             "docker run --rm --net none "
-            f"-v {sites_directory}:/home/frappe/frappe-bench/sitesmount "
+            f"-v {sites_directory}:/home/ivend/ivend-bench/sitesmount "
             f"{config['docker_image']} cp -LR sites/. sitesmount"
         )
         return self.execute(command, directory=bench_directory)
@@ -220,7 +220,7 @@ class Server(Base):
         """Checks archived (bench and site) and unused docker artefacts size"""
         archived_sites_directory = os.path.join(self.benches_directory, "*", "sites", "archived")
         archived_folder_size = self.execute(
-            "du -sB1 /home/frappe/archived/ --exclude assets | awk '{print $1}'"
+            "du -sB1 /home/ivend/archived/ --exclude assets | awk '{print $1}'"
         ).get("output")
         archived_folder_size = float(archived_folder_size)
 

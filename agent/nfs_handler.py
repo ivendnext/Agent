@@ -10,8 +10,8 @@ if typing.TYPE_CHECKING:
 class NFSHandler:
     def __init__(self, server: "Server"):
         self.server = server
-        self.exports_file = "/home/frappe/exports"
-        self.shared_directory = "/home/frappe/nfs"
+        self.exports_file = "/home/ivend/exports"
+        self.shared_directory = "/home/ivend/nfs"
         self.options = "rw,sync,no_subtree_check"
 
     def reload_exports(self):
@@ -29,7 +29,7 @@ class NFSHandler:
         server_shared_directory = os.path.join(self.shared_directory, shared_directory)
 
         os.makedirs(server_shared_directory)
-        self.server.execute(f"chown -R frappe:frappe {server_shared_directory}")
+        self.server.execute(f"chown -R ivend:ivend {server_shared_directory}")
 
         lock = filelock.SoftFileLock(self.exports_file + ".lock")
 

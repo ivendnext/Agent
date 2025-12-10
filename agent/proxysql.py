@@ -13,7 +13,7 @@ class ProxySQL(Server):
     def proxysql_execute(self, command):
         command = (
             "mysql -h 127.0.0.1 -P 6032 "
-            f"-u frappe -p{self.proxysql_admin_password} "
+            f"-u ivend -p{self.proxysql_admin_password} "
             f"--disable-column-names -e '{command}'"
         )
         return self.execute(command)

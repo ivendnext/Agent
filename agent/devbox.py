@@ -104,7 +104,7 @@ class Devbox(Base):
             f"-v {self.devbox_name}_db-data:/var/lib/mysql "
             f'-e PASSWORD="{self.codeserver_password}" '
             f'-e VNC_PASSWORD="{self.vnc_password}" '
-            f"-v {self.devbox_name}_home:/home/frappe "
+            f"-v {self.devbox_name}_home:/home/ivend "
             f"{self.devbox_image_reference}"
         )
         return self.execute(command)

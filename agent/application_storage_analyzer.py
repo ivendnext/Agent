@@ -54,7 +54,7 @@ def build_tree_structure(  # noqa: C901
     total_size = calculate_directory_size(entry)
 
     node = {
-        "name": metadata["name"] if metadata["name"] != "/home/frappe/benches" else "Benches",
+        "name": metadata["name"] if metadata["name"] != "/home/ivend/benches" else "Benches",
         "size": total_size,
         "size_formatted": format_size(total_size),
         "is_file": "asize" in metadata and "dsize" not in metadata,

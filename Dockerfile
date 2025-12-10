@@ -1,18 +1,18 @@
 FROM python:3.7-slim
 
-RUN useradd -ms /bin/bash frappe
-USER frappe
-ENV HOME /home/frappe
+RUN useradd -ms /bin/bash ivend
+USER ivend
+ENV HOME /home/ivend
 ENV PATH $PATH:$HOME/.local/bin
 
-RUN mkdir /home/frappe/agent && \
-  mkdir /home/frappe/repo && \
-  chown -R frappe:frappe /home/frappe
+RUN mkdir /home/ivend/agent && \
+  mkdir /home/ivend/repo && \
+  chown -R ivend:ivend /home/ivend
 
-COPY --chown=frappe:frappe requirements.txt /home/frappe/repo/
-RUN pip install --user --requirement /home/frappe/repo/requirements.txt
+COPY --chown=ivend:ivend requirements.txt /home/ivend/repo/
+RUN pip install --user --requirement /home/ivend/repo/requirements.txt
 
-COPY --chown=frappe:frappe . /home/frappe/repo/
-RUN pip install --user --editable /home/frappe/repo
+COPY --chown=ivend:ivend . /home/ivend/repo/
+RUN pip install --user --editable /home/ivend/repo
 
-WORKDIR /home/frappe/agent
+WORKDIR /home/ivend/agent

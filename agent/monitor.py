@@ -11,8 +11,8 @@ from agent.server import Server
 class Monitor(Server):
     def __init__(self, directory=None):
         super().__init__(directory=directory)
-        self.prometheus_directory = "/home/frappe/prometheus"
-        self.alertmanager_directory = "/home/frappe/alertmanager"
+        self.prometheus_directory = "/home/ivend/prometheus"
+        self.alertmanager_directory = "/home/ivend/alertmanager"
 
     def update_rules(self, rules):
         rules_file = os.path.join(self.prometheus_directory, "rules", "agent.yml")
