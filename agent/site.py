@@ -9,6 +9,7 @@ import time
 from datetime import datetime
 from shlex import quote
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import requests
 
@@ -48,6 +49,7 @@ class Site(Base):
         self.user = self.config["db_name"]
         self.password = self.config["db_password"]
         self.host = self.config.get("db_host", self.bench.host)
+        self.db_port = self.config.get("db_port", self.bench.db_port)
 
     def bench_execute(self, command, input=None, non_zero_throw=True):
         return self.bench.docker_execute(f"bench --site {self.name} {command}", input=input, non_zero_throw=non_zero_throw)
@@ -323,7 +325,7 @@ class Site(Base):
             "FLUSH PRIVILEGES",
         ]
         for query in queries:
-            command = f'mysql -h {self.host} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
+            command = f'mysql -h {self.host} -P {self.db_port} -uroot -p{mariadb_root_password} -e "{query}"'
             self.execute(command)
         return {"database": database, "user": user, "password": password}
 
@@ -396,7 +398,7 @@ class Site(Base):
             output = self.execute(
                 "set -o pipefail && "
                 f"gunzip -c '{backup_file_path}' | "
-                f"mysql -h {self.host} -u {self.user} -p{self.password} "
+                f"mysql -h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
                 f"{self.database}",
                 executable="/bin/bash",
             )
@@ -445,12 +447,14 @@ class Site(Base):
     @step("Reset Site Usage")
     def reset_site_usage(self):
         pattern = f"{self.database}|rate-limit-counter-[0-9]*"
-        keys_command = f"redis-cli --raw -p 13000 KEYS '{pattern}'"
+        password = urlparse(self.bench.config.get("redis_cache")).password
+        password_arg = f"-a '{password}'" if password else ""
+        keys_command = f"redis-cli --raw -p 13000 {password_arg} KEYS '{pattern}'"
         keys = self.bench.docker_execute(keys_command)
         data = {"keys": keys, "get": [], "delete": []}
         for key in keys["output"].splitlines():
-            get = self.bench.docker_execute(f"redis-cli -p 13000 GET '{key}'")
-            delete = self.bench.docker_execute(f"redis-cli -p 13000 DEL '{key}'")
+            get = self.bench.docker_execute(f"redis-cli -p 13000 {password_arg} GET '{key}'")
+            delete = self.bench.docker_execute(f"redis-cli -p 13000 {password_arg} DEL '{key}'")
             data["get"].append(get)
             data["delete"].append(delete)
         return data
@@ -564,7 +568,7 @@ class Site(Base):
             output = self.execute(
                 "set -o pipefail && "
                 "mysqldump --single-transaction --quick --lock-tables=false "
-                f"-h {self.host} -u {self.user} -p{self.password} "
+                f"-h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
                 f"{self.database} '{table}' "
                 f" | gzip > '{backup_file}'",
                 executable="/bin/bash",
@@ -651,7 +655,7 @@ class Site(Base):
                 output = self.execute(
                     "set -o pipefail && "
                     f"gunzip -c '{backup_file}' | "
-                    f"mysql -h {self.host} -u {self.user} -p{self.password} "
+                    f"mysql -h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
                     f"{self.database}",
                     executable="/bin/bash",
                 )
@@ -666,7 +670,7 @@ class Site(Base):
         data = {"dropped": {}}
         for table in new_tables:
             output = self.execute(
-                f"mysql -h {self.host} -u {self.user} -p{self.password} "
+                f"mysql -h {self.host} -P {self.db_port} -u {self.user} -p{self.password} "
                 f"{self.database} -e 'DROP TABLE `{table}`'"
             )
             data["dropped"][table] = output
@@ -755,7 +759,7 @@ print(">>>" + frappe.session.sid + "<<<")
         )
         try:
             timezone = self.execute(
-                f"mysql -h {self.host} -u{self.database} -p{self.password} "
+                f"mysql -h {self.host} -P {self.db_port} -u{self.database} -p{self.password} "
                 f'--connect-timeout 3 -sN -e "{query}"'
             )["output"].strip()
         except Exception:
@@ -766,7 +770,7 @@ print(">>>" + frappe.session.sid + "<<<")
     def tables(self):
         return self.execute(
             "mysql --disable-column-names -B -e 'SHOW TABLES' "
-            f"-h {self.host} -u {self.user} -p{self.password} {self.database}"
+            f"-h {self.host} -P {self.db_port} -u {self.user} -p{self.password} {self.database}"
         )["output"].split("\n")
 
     @property
@@ -799,17 +803,47 @@ print(">>>" + frappe.session.sid + "<<<")
         return {"backups": backup_files, "offsite": uploaded_files}
 
     @job("Optimize Tables")
-    def optimize_tables_job(self):
-        return self.optimize_tables()
+    def optimize_tables_job(self, tables: list[str] | None):
+        return self.optimize_tables(tables)
 
     @step("Optimize Tables")
-    def optimize_tables(self):
-        tables = [row[0] for row in self.get_database_free_tables()]
+    def optimize_tables(self, tables: list[str] | None = None):
+        if not tables:
+            tables = [row[0] for row in self.get_database_free_tables()]
+
+        optimized_tables = []
+        failed_optimizations = []
+
         for table in tables:
             query = f"OPTIMIZE TABLE `{table}`"
-            self.execute(
-                f"mysql -sN -h {self.host} -u{self.user} -p{self.password} {self.database} -e '{query}'"
+            try:
+                self.execute(
+                    f"mysql -sN -h {self.host} -P {self.db_port} "
+                    f"-u{self.user} -p{self.password} {self.database} -e '{query}'"
+                )
+                optimized_tables.append(table)
+            except:  # noqa # pylint: disable=bare-except
+                failed_optimizations.append(table)
+                continue
+
+        if not tables:
+            return {"output": "No tables require optimization."}
+
+        message_parts = []
+
+        if optimized_tables:
+            message_parts.append(
+                f"Successfully optimized {len(optimized_tables)} table(s):\n- "
+                + "\n- ".join(optimized_tables)
             )
+
+        if failed_optimizations:
+            message_parts.append(
+                f"Failed to optimize {len(failed_optimizations)} table(s):\n- "
+                + "\n- ".join(failed_optimizations)
+            )
+
+        return {"output": "\n\n".join(message_parts)}
 
     def fetch_latest_backup(self, with_files=True):
         databases, publics, privates, site_configs = [], [], [], []
@@ -879,18 +913,30 @@ print(">>>" + frappe.session.sid + "<<<")
         return json.loads(analytics)
 
     def get_database_size(self):
-        # only specific to mysql/mariaDB. use a different query for postgres.
-        # or try using frappe.db.get_database_size if possible
-        query = (
-            "SELECT SUM(`data_length` + `index_length`)"
-            " FROM information_schema.tables"
-            f' WHERE `table_schema` = "{self.database}"'
-            " GROUP BY `table_schema`"
-        )
-        command = f"mysql -sN -h {self.host} -u{self.user} -p{self.password} -e '{query}'"
-        database_size = self.execute(command).get("output")
+        # try:
+        #     query = f'SELECT size FROM press_meta.schema_sizes WHERE `schema` = "{self.database}"'
+        #     command = f"mysql -sN -h {self.host} -P {self.db_port} \
+        #         -u{self.user} -p{self.password} -e '{query}'"
+        #     database_size = self.execute(command).get("output")
+        # except Exception:
+        # # Fallback to old way if press_meta is not available
 
         try:
+            # only specific to mysql/mariaDB. use a different query for postgres.
+            # or try using frappe.db.get_database_size if possible
+            query = (
+                "SELECT SUM(`data_length` + `index_length` + `data_free`)"
+                " FROM information_schema.tables"
+                f' WHERE `table_schema` = "{self.database}"'
+                " GROUP BY `table_schema`"
+            )
+            command = f"mysql -sN -h {self.host} -P {self.db_port} \
+                -u{self.user} -p{self.password} -e '{query}'"
+            database_size = self.execute(command).get("output")
+        except Exception as e:
+            raise e
+        try:
+            assert database_size is not None, "Could not fetch database size"
             return int(database_size)
         except Exception:
             return 0
@@ -937,7 +983,7 @@ print(">>>" + frappe.session.sid + "<<<")
             f' WHERE `table_schema` = "{self.database}"'
             " GROUP BY `table_schema`"
         )
-        command = f"mysql -sN -h {self.host} -u{self.user} -p{self.password} -e '{query}'"
+        command = f"mysql -sN -h {self.host} -P {self.db_port} -u{self.user} -p{self.password} -e '{query}'"
         database_size = self.execute(command).get("output")
 
         try:
@@ -955,7 +1001,9 @@ print(">>>" + frappe.session.sid + "<<<")
                 " AND ((`data_free` / (`data_length` + `index_length`)) > 0.2"
                 " OR `data_free` > 100 * 1024 * 1024)"
             )
-            command = f"mysql -sN -h {self.host} -u{self.user} -p{self.password} -e '{query}'"
+            command = (
+                f"mysql -sN -h {self.host} -P {self.db_port} -u{self.user} -p{self.password} -e '{query}'"
+            )
             output = self.execute(command).get("output")
             return [line.split("\t") for line in output.splitlines()]
         except Exception:
@@ -1042,7 +1090,7 @@ print(">>>" + frappe.session.sid + "<<<")
             username = self.user
         if not password:
             password = self.password
-        return Database(self.host, 3306, username, password, self.database)
+        return Database(self.host, self.db_port, username, password, self.database)
 
     @property
     def job_record(self):

@@ -7,12 +7,13 @@ import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 import psutil
 from mariadb_binlog_indexer import Indexer as BinlogIndexer
 from peewee import MySQLDatabase
 
-from agent.database import Database
+from agent.database import CustomPeeweeDB, Database
 from agent.job import job, step
 from agent.server import Server
 
@@ -39,7 +40,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             mariadb.connect(reuse_if_open=True)
             mariadb.execute_sql("SELECT 1;")
@@ -48,6 +49,141 @@ class DatabaseServer(Server):
             return True
         except Exception:
             return False
+
+    @step("Setup Metadata Table")
+    def setup_press_meta_schema_sizes_table(self, private_ip, mariadb_root_password):
+        db = CustomPeeweeDB(
+            "mysql",
+            user="root",
+            password=mariadb_root_password,
+            host=private_ip,
+            port=3306,
+        )
+
+        # Create database if not exists
+        db.execute_sql("CREATE DATABASE IF NOT EXISTS press_meta;")
+
+        # Re-init database connection to use the newly created database
+        db = CustomPeeweeDB(
+            "press_meta",
+            user="root",
+            password=mariadb_root_password,
+            host=private_ip,
+            port=3306,
+        )
+
+        # Create `_schema_sizes_internal` table if not exists
+        db.execute_sql(
+            """CREATE TABLE IF NOT EXISTS _schema_sizes_internal (
+    `schema` VARCHAR(255) PRIMARY KEY,
+    `size` BIGINT NOT NULL DEFAULT 0
+) ENGINE=InnoDB;"""
+        )
+
+        # Create `schema_sizes` view if not exists
+        db.execute_sql(
+            """CREATE OR REPLACE
+DEFINER='root'@'localhost'
+SQL SECURITY DEFINER
+VIEW schema_sizes AS
+SELECT
+    `schema`,
+    `size`
+FROM _schema_sizes_internal
+WHERE `schema` IN (
+    SELECT DISTINCT table_schema
+    FROM information_schema.SCHEMA_PRIVILEGES
+    WHERE grantee LIKE CONCAT('%', SUBSTRING_INDEX(USER(), '@', 1), '%')
+    AND privilege_type IN ('SELECT', 'ALL PRIVILEGES')
+    AND table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys', 'press_meta')
+);
+"""
+        )
+
+        # Find all users
+        users = db.execute_sql(
+            'SELECT DISTINCT user, host FROM mysql.user WHERE user not in ("mysql", "root", "mariadb.sys", "read_all_press_meta", "monitor");'  # noqa: E501
+        ).fetchall()
+        if users:
+            # Grant usage and read_all_press_meta role to all users
+            query = "GRANT USAGE ON press_meta.* TO "
+            query += ", ".join([f"'{user[0]}'@'{user[1]}'" for user in users])
+            query += ";"
+            db.execute_sql(query)
+
+            # Allow select on schema_sizes view to all users
+            query = "GRANT SELECT ON press_meta.schema_sizes TO "
+            query += ", ".join([f"'{user[0]}'@'{user[1]}'" for user in users])
+            query += ";"
+            db.execute_sql(query)
+
+        # Flush privileges
+        db.execute_sql("FLUSH PRIVILEGES;")
+
+    @step("Update Database Schema Size in Metadata Table")
+    def update_schema_sizes(self, private_ip, mariadb_root_password):
+        db = Database(private_ip, 3306, "root", mariadb_root_password, "press_meta")
+        success, output = db.execute_query("SHOW DATABASES;")
+        if not success:
+            raise Exception(f"Failed to fetch databases: {output}")
+
+        databases = [x[0] for x in output[0].get("output").get("data")]
+        database_sizes = {}
+        for database in databases:
+            if database in ("information_schema", "performance_schema", "mysql", "sys", "press_meta"):
+                continue
+
+            with contextlib.suppress(Exception):
+                """
+                1. Exlcude files smaller than 128 KB
+                2. Only check for ibd and MYD files
+                3. Discount for filesystem overhead
+                - For ibd files:
+                    - <25 MB -> 2.5 MB
+                    - 25-100 MB -> 5 MB
+                    - 100-500 MB -> 10 MB
+                    - >500 MB -> 20 MB
+                    - Extra extent discount: 1 MB per 64 MB of table size
+                """
+
+                cmd = (
+                    f"sudo find /var/lib/mysql/{database} "
+                    r"-type f \( -name '*.ibd' -o -name '*.MYD' \) -size +128k "
+                    r"-exec du -b --apparent-size {} + | "
+                    r"""awk '{
+                        size=$1;
+                        file=$2;
+                        discount=0;
+                        if(file ~ /\.ibd$/){
+                            if(size < 25*1024*1024) discount = 2.5*1024*1024;
+                            else if(size < 100*1024*1024) discount = 5*1024*1024;
+                            else if(size < 500*1024*1024) discount = 10*1024*1024;
+                            else discount = 20*1024*1024;
+                            discount += int(size/(64*1024*1024))*1024*1024
+                        }
+                        sum += size;
+                        sum_discount += discount
+                    } END {print sum - sum_discount}'"""
+                )
+
+                size = self.execute(cmd)["output"].strip()
+                database_sizes[database] = max(0, int(size))
+
+        query = ""
+        for database, size in database_sizes.items():
+            query += f"REPLACE INTO press_meta._schema_sizes_internal (`schema`, `size`) VALUES ('{database}', {size});\n"  # noqa: E501
+
+        if not query:
+            return
+
+        success, msg = db.execute_query(query, commit=True)
+        if not success:
+            raise Exception(f"Failed to update schema sizes: {msg}")
+
+    @job("Update Database Schema Sizes", priority="low")
+    def update_schema_sizes_job(self, private_ip, mariadb_root_password):
+        self.setup_press_meta_schema_sizes_table(private_ip, mariadb_root_password)
+        self.update_schema_sizes(private_ip, mariadb_root_password)
 
     def search_binary_log(
         self,
@@ -113,7 +249,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             gtid_binlog_pos = self.sql(mariadb, "SELECT @@GLOBAL.gtid_binlog_pos;")[0][
                 "@@GLOBAL.gtid_binlog_pos"
@@ -154,6 +290,7 @@ class DatabaseServer(Server):
         master_private_ip,
         master_mariadb_root_password,
         gtid_slave_pos=None,
+        master_db_port=3306,
     ):
         try:
             """Configure replication on the MariaDB server."""
@@ -162,7 +299,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             mariadb.execute_sql("STOP SLAVE;")
             mariadb.execute_sql("RESET SLAVE ALL;")
@@ -170,7 +307,7 @@ class DatabaseServer(Server):
                 mariadb.execute_sql(f"SET GLOBAL gtid_slave_pos = '{gtid_slave_pos}';")
             mariadb.execute_sql(f"""CHANGE MASTER TO
                 MASTER_HOST = '{master_private_ip}',
-                MASTER_PORT = 3306,
+                MASTER_PORT = {master_db_port},
                 MASTER_USER = 'root',
                 MASTER_PASSWORD = '{master_mariadb_root_password}',
                 MASTER_USE_GTID=slave_pos;
@@ -196,7 +333,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             mariadb.execute_sql("STOP SLAVE;")
             mariadb.execute_sql("RESET SLAVE ALL;")
@@ -221,7 +358,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             mariadb.execute_sql("START SLAVE;")
             return {
@@ -245,7 +382,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             mariadb.execute_sql("STOP SLAVE;")
             return {
@@ -261,6 +398,10 @@ class DatabaseServer(Server):
                 "error": traceback.format_exc(),
             }
 
+    @property
+    def db_port(self):
+        return self.config.get("db_port") or 3306
+
     def processes(self, private_ip, mariadb_root_password):
         try:
             mariadb = MySQLDatabase(
@@ -268,7 +409,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             return self.sql(mariadb, "SHOW FULL PROCESSLIST")
         except Exception:
@@ -284,7 +425,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             return self.sql(mariadb, "SHOW VARIABLES")
         except Exception:
@@ -300,7 +441,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             return self.sql(
                 mariadb,
@@ -324,7 +465,7 @@ class DatabaseServer(Server):
                 user="root",
                 password=mariadb_root_password,
                 host=private_ip,
-                port=3306,
+                port=self.db_port,
             )
             for process in processes:
                 if (
@@ -352,7 +493,7 @@ class DatabaseServer(Server):
             user="root",
             password=mariadb_root_password,
             host=private_ip,
-            port=3306,
+            port=self.db_port,
         )
 
         return self.sql(
@@ -387,7 +528,7 @@ class DatabaseServer(Server):
         return self.fetch_column_stats(schema, table, private_ip, mariadb_root_password)
 
     def fetch_column_stats(self, schema, table, private_ip, mariadb_root_password):
-        db = Database(private_ip, 3306, "root", mariadb_root_password, schema)
+        db = Database(private_ip, self.db_port, "root", mariadb_root_password, schema)
         results = db.fetch_database_column_statistics(table)
         return {"output": json.dumps(results)}
 
@@ -397,7 +538,7 @@ class DatabaseServer(Server):
             user="root",
             password=mariadb_root_password,
             host=private_ip,
-            port=3306,
+            port=self.db_port,
         )
 
         if not query.lower().startswith(("select", "update", "delete")):
@@ -446,7 +587,7 @@ class DatabaseServer(Server):
 
     def _purge_binlog(self, private_ip: str, mariadb_root_password: str, to_binlog: str) -> bool:
         try:
-            mariadb = Database(private_ip, 3306, "root", mariadb_root_password, "mysql")
+            mariadb = Database(private_ip, self.db_port, "root", mariadb_root_password, "mysql")
             mariadb.execute_query(f"PURGE BINARY LOGS TO '{to_binlog}';", commit=True)
             return True
         except Exception:
@@ -570,7 +711,11 @@ class DatabaseServer(Server):
 
     @property
     def binlog_indexer(self) -> BinlogIndexer:
-        return BinlogIndexer(os.path.join(self.directory, "binlog-indexes"), "queries.db")
+        binlog_indexes_path = os.path.join(os.path.dirname(self.directory), "binlog_indexes")
+        if not os.path.exists(binlog_indexes_path):
+            os.makedirs(binlog_indexes_path, exist_ok=True)
+
+        return BinlogIndexer(os.path.join(os.path.dirname(self.directory), "binlog_indexes"), "queries.db")
 
     @job("Add Binlogs To Indexer", priority="low")
     def add_binlogs_to_index_job(self, binlogs: list[str]) -> dict:
@@ -584,14 +729,45 @@ class DatabaseServer(Server):
             "current_binlog": self._get_current_binlog(),
         }
         cpu_usage = psutil.cpu_percent(interval=5)
-        if cpu_usage > 50:
-            data["message"] = "CPU usage > 50%. Skipped indexing"
+        if cpu_usage > 70:
+            data["message"] = "CPU usage > 70%. Skipped indexing"
             return data
+
+        """
+        Check how much memory is available (free + reclaimable)
+        - total memory < 4GB or available memory < 1GB, allow only 200MB for indexing & use low-memory profile
+        - total memory < 8GB or available memory > 1GB, allow only 400MB for indexing & use balanced profile
+        - total memory > 8GB and available memory > 2GB, allow 1GB for indexing & use high-compression profile
+        """
+
+        memory = psutil.virtual_memory()
+        cpu_count = psutil.cpu_count(logical=True) or 1
+
+        profile = "balanced"
+        if memory.available < (1 * 1024**3) or memory.total <= (4 * 1024**3) or cpu_count <= 2:
+            allocatable_memory_bytes = 200 * (1024**2)  # 200 MB
+            cpu_quota_percentage = 30  # 0.3 core at max
+            profile = "low-memory"
+        elif memory.available < (2 * 1024**3) or memory.total <= (8 * 1024**3) or cpu_count <= 4:
+            allocatable_memory_bytes = 400 * (1024**2)  # 400 MB
+            cpu_quota_percentage = 60  # 0.6 core at max
+            profile = "balanced"
+        else:
+            allocatable_memory_bytes = 1024 * (1024**2)  # 1 GB
+            profile = "high-compression"
+            cpu_quota_percentage = 100  # 1 core at max
+
+        allocatable_memory_mb = allocatable_memory_bytes // (1024**2)
 
         indexed_binlogs = []
         for binlog in binlogs:
             try:
-                self.binlog_indexer.add(os.path.join(self.mariadb_directory, binlog))
+                self.binlog_indexer.add(
+                    os.path.join(self.mariadb_directory, binlog),
+                    mode=profile,
+                    cpu_quota_percentage=cpu_quota_percentage,
+                    memory_hard_limit=allocatable_memory_mb,
+                )
                 indexed_binlogs.append(binlog)
             except Exception as e:
                 data["message"] = f"Failed to index binlog {binlog}: {e}"
@@ -707,9 +883,24 @@ class DatabaseServer(Server):
         ]
 
     def get_timeline(
-        self, start_timestamp: int, end_timestamp: int, database: str | None = None, type: str | None = None
+        self,
+        start_timestamp: int,
+        end_timestamp: int,
+        database: str | None = None,
+        table: str | None = None,
+        type: str | None = None,
+        event_size_comparator: Literal["gt", "lt"] | None = None,
+        event_size: int | None = None,
     ):
-        return self.binlog_indexer.get_timeline(start_timestamp, end_timestamp, type, database)
+        return self.binlog_indexer.get_timeline(
+            start_timestamp,
+            end_timestamp,
+            type,
+            database,
+            table,
+            event_size_comparator,
+            event_size,
+        )
 
     def get_row_ids(
         self,
@@ -719,9 +910,18 @@ class DatabaseServer(Server):
         database: str,
         table: str | None = None,
         search_str: str | None = None,
+        event_size_comparator: Literal["gt", "lt"] | None = None,
+        event_size: int | None = None,
     ):
         return self.binlog_indexer.get_row_ids(
-            start_timestamp, end_timestamp, type, database, table, search_str
+            start_timestamp,
+            end_timestamp,
+            type,
+            database,
+            table,
+            search_str,
+            event_size_comparator,
+            event_size,
         )
 
     def get_queries(self, row_ids: dict[str, list[int]], database: str):

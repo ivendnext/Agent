@@ -5,9 +5,29 @@ map $host $subdomain_map {
 {% for name, upstream in upstreams.items() %}
 upstream {{ upstream["hash"] }} {
 	server {{ name }}:80;
-	keepalive 100;
+
+	{% for secondary in upstream["secondaries"] %}
+
+		{% for ip, weight in secondary.items() %}
+			server {{ ip }}:80 weight={{ weight }};
+		{% endfor %}
+
+	{% endfor %}
+
+	{% if upstream["secondaries"]|length == 0 %}
+		keepalive 100;
+	{% endif %}
 }
 {% endfor %}
+
+{%- for name, upstream in upstreams.items() %}
+{%- if upstream["secondaries"]|length > 0 %}
+upstream {{ upstream["hash"] }}_primary {
+    server {{ name }}:80;
+}
+
+{% endif %}
+{%- endfor -%}
 
 upstream site_not_found {
 	server 127.0.0.1:10090;
@@ -41,6 +61,19 @@ map $actual_host $upstream_server_hash {
 	{%- endfor %}
 {% endfor %}
 	default http://site_not_found;
+}
+
+map $actual_host $socket_upstream_hash {
+{%- for upstream in upstreams.values() -%}
+    {%- for site in upstream["sites"] %}
+        {%- if site.is_auto_scaled %}
+            {{ site.name }} http://{{ site.upstream }}_primary;
+        {%- else %}
+            {{ site.name }} http://{{ site.upstream }};
+        {%- endif -%}
+    {%- endfor %}
+{%- endfor %}
+    default http://site_not_found;
 }
 
 map $host $actual_host {
@@ -148,7 +181,6 @@ server {
 
 	location /socket.io {
 		proxy_http_version 1.1;
-
 		proxy_set_header Upgrade $http_upgrade;
 		proxy_set_header Host $host;
 		proxy_set_header X-Real-IP $remote_addr;
@@ -156,9 +188,9 @@ server {
 		proxy_set_header X-Forwarded-Proto $scheme;
 		proxy_set_header Connection "upgrade";
 
-		more_set_headers "X-Proxy-Upstream: $upstream_server_hash";
+		more_set_headers "X-Proxy-Upstream: $socket_upstream_hash";
 
-		proxy_pass $upstream_server_hash;
+		proxy_pass $socket_upstream_hash;
 	}
 
 	location /vscode {

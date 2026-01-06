@@ -232,7 +232,6 @@ def change_bench_directory():
     job = Server().change_bench_directory(
         is_primary=data.get("is_primary"),
         directory=data.get("directory"),
-        redis_password=data.get("redis_password"),
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
         redis_connection_string_ip=data.get("redis_connection_string_ip"),
         restart_benches=data.get("restart_benches"),
@@ -297,6 +296,21 @@ def get_docker_image_size(image_tag: str):
     return {"size": size}
 
 
+@application.route("/server/push-images", methods=["POST"])
+def push_docker_images_to_registry():
+    data = request.json
+    job = Server().push_images_to_registry(
+        images=data.get("images"), registry_settings=data.get("registry_settings")
+    )
+    return {"job": job}
+
+
+@application.route("/server/remove-localhost-redis-bind", methods=["POST"])
+def remove_localhost_redis_bind():
+    job = Server().remove_redis_localhost_bind()
+    return {"job": job}
+
+
 @application.route("/server/reclaimable-size", methods=["GET"])
 def get_reclaimable_size():
     return Server().get_reclaimable_size()
@@ -313,22 +327,18 @@ def pull_docker_images():
 def add_to_acl():
     data = request.json
     Server().add_to_acl(
-        primary_server_private_ip=data.get("primary_server_private_ip"),
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
-        shared_directory=data.get("shared_directory"),
     )
-    return {"shared_directory": f"/home/frappe/nfs/{data.get('private_ip')}"}
+    return {"shared_directory": "/home/frappe/shared"}
 
 
 @application.route("/nfs/remove-from-acl", methods=["POST"])
 def remove_from_acl():
     data = request.json
     Server().remove_from_acl(
-        primary_server_private_ip=data.get("primary_server_private_ip"),
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
-        shared_directory=data.get("shared_directory"),
     )
-    return {"shared_directory": f"/home/frappe/nfs/{data.get('private_ip')}"}
+    return {"shared_directory": "/home/frappe/shared"}
 
 
 @application.route("/nfs/share-sites", methods=["POST"])
@@ -487,13 +497,6 @@ def restart_bench(bench):
     return {"job": job}
 
 
-@application.route("/server/set-redis-password", methods=["POST"])
-def set_redis_password():
-    data = request.json
-    job = Server().set_redis_password(data.get("redis_password"))
-    return {"job": job}
-
-
 @application.route("/benches/<string:bench>/limits", methods=["POST"])
 def update_bench_limits(bench):
     data = request.json
@@ -648,7 +651,10 @@ def complete_setup_wizard(bench, site):
 
 @application.route("/benches/<string:bench>/sites/<string:site>/optimize", methods=["POST"])
 def optimize_tables(bench, site):
-    job = Server().benches[bench].sites[site].optimize_tables_job()
+    # check if table name has been passed
+    data = request.json or {}
+    tables = data.get("tables")
+    job = Server().benches[bench].sites[site].optimize_tables_job(tables=tables)
     return {"job": job}
 
 
@@ -1153,6 +1159,19 @@ def proxy_add_upstream_site(upstream):
     return {"job": job}
 
 
+@application.route("/proxy/upstreams/<string:primary_upstream>/auto-scale-site", methods=["POST"])
+def proxy_add_auto_scale_site_to_upstream(primary_upstream):
+    data = request.json
+    job = Proxy().add_auto_scale_sites_to_upstream(primary_upstream, data["secondary_upstreams"])
+    return {"job": job}
+
+
+@application.route("/proxy/upstreams/<string:primary_upstream>/remove-auto-scale-site", methods=["POST"])
+def proxy_remove_auto_scale_site_to_upstream(primary_upstream):
+    job = Proxy().remove_auto_scale_site_from_upstream(primary_upstream)
+    return {"job": job}
+
+
 @application.route("/proxy/upstreams/<string:upstream>/domains", methods=["POST"])
 def proxy_add_upstream_site_domain(upstream):
     data = request.json
@@ -1237,6 +1256,15 @@ def physical_restore_database():
         restore_specific_tables=data.get("restore_specific_tables", False),
         tables_to_restore=data.get("tables_to_restore", []),
     ).create_restore_job()
+    return {"job": job}
+
+
+@application.route("/database/update-schema-sizes", methods=["POST"])
+def update_schema_sizes():
+    data = request.json
+    assert "private_ip" in data, "private_ip is required"
+    assert "mariadb_root_password" in data, "mariadb_root_password is required"
+    job = DatabaseServer().update_schema_sizes_job(**data)
     return {"job": job}
 
 
