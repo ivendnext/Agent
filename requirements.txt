@@ -28,4 +28,8 @@ sentry-sdk[flask, rq]==2.1.1
 sql_metadata==2.15.0
 py-spy==0.4.0
 mariadb-binlog-indexer==0.0.19
+<<<<<<< HEAD
+=======
+mariadb-table-usage==0.0.3
+>>>>>>> 31976d9 (feat: Bump mariadb-table-usage version to 0.0.3)
 psutil==7.0.0
