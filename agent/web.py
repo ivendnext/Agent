@@ -676,7 +676,8 @@ def install_app_site(bench, site):
 )
 @validate_bench_and_site
 def uninstall_app_site(bench, site, app):
-    job = Server().benches[bench].sites[site].uninstall_app_job(app)
+    data = request.json or {}
+    job = Server().benches[bench].sites[site].uninstall_app_job(app, data.get("offsite", {}))
     return {"job": job}
 
 
@@ -986,7 +987,11 @@ def update_site_recover(bench, site):
 @validate_bench
 def archive_site(bench, site):
     data = request.json
-    job = Server().benches[bench].archive_site(site, data["mariadb_root_password"], data.get("force"))
+    job = (
+        Server()
+        .benches[bench]
+        .archive_site(site, data["mariadb_root_password"], data.get("force"), data.get("offsite", {}))
+    )
     return {"job": job}
 
 
