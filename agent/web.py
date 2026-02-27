@@ -32,7 +32,6 @@ from agent.nginx_reload_manager import NginxReloadManager
 from agent.nginx_reload_manager import ReloadStatus as NginxReloadStatus
 from agent.proxy import Proxy
 from agent.proxysql import ProxySQL
-from agent.security import Security
 from agent.server import Server
 from agent.snapshot_recovery import SnapshotRecovery
 from agent.ssh import SSHProxy
@@ -461,16 +460,6 @@ def get_logs(bench, site):
 @validate_bench_and_site
 def get_log(bench, site, log):
     return {log: Server().benches[bench].sites[site].retrieve_log(log)}
-
-
-@application.route("/security/ssh_session_logs")
-def get_ssh_session_logs():
-    return {"logs": Security().ssh_session_logs}
-
-
-@application.route("/security/retrieve_ssh_session_log/<string:filename>")
-def retrieve_ssh_session_log(filename):
-    return {"log_details": Security().retrieve_ssh_session_log(filename)}
 
 
 @application.route("/benches/<string:bench>/sites/<string:site>/sid", methods=["GET", "POST"])
@@ -1273,9 +1262,16 @@ def physical_restore_database():
 @application.route("/database/update-schema-sizes", methods=["POST"])
 def update_schema_sizes():
     data = request.json
-    assert "private_ip" in data, "private_ip is required"
-    assert "mariadb_root_password" in data, "mariadb_root_password is required"
-    job = DatabaseServer().update_schema_sizes_job(**data)
+    private_ip = data.get("private_ip")
+    mariadb_root_password = data.get("mariadb_root_password")
+    io_ops_limit = data.get("io_ops_limit", 200)
+    concurrency = data.get("concurrency", 20)
+    job = DatabaseServer().update_schema_sizes_job(
+        private_ip=private_ip,
+        mariadb_root_password=mariadb_root_password,
+        io_ops_limit=io_ops_limit,
+        concurrency=concurrency,
+    )
     return {"job": job}
 
 
