@@ -70,12 +70,13 @@ def ping_server(password: str):
 @setup.command()
 @click.option("--name", required=True)
 @click.option("--user", default="frappe")
+@click.option("--db-port", default=3306)
 @click.option("--workers", required=True, type=int)
 @click.option("--proxy-ip", required=False, type=str, default=None)
 @click.option("--sentry-dsn", required=False, type=str)
 @click.option("--allow-sleepy-containers", is_flag=True)
 @click.option("--press-url", required=False, type=str)
-def config(name, user, workers, proxy_ip=None, sentry_dsn=None, allow_sleepy_containers=False, press_url=None):
+def config(name, user, workers, proxy_ip=None, sentry_dsn=None, allow_sleepy_containers=False, press_url=None, db_port=3306):
     config = {
         "benches_directory": f"/home/{user}/benches",
         "devboxes_directory": f"/home/{user}/devboxes",
@@ -89,6 +90,7 @@ def config(name, user, workers, proxy_ip=None, sentry_dsn=None, allow_sleepy_con
         "web_port": 25052,
         "allow_sleepy_containers": allow_sleepy_containers,
         "press_url": "https://frappecloud.com",
+        "db_port": db_port,
     }
     if press_url:
         config["press_url"] = press_url

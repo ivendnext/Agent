@@ -35,7 +35,6 @@ from agent.nginx_reload_manager import NginxReloadManager
 from agent.nginx_reload_manager import ReloadStatus as NginxReloadStatus
 from agent.proxy import Proxy
 from agent.proxysql import ProxySQL
-from agent.security import Security
 from agent.server import Server
 from agent.snapshot_recovery import SnapshotRecovery
 from agent.ssh import SSHProxy
@@ -216,6 +215,7 @@ def build_image():
         no_push=data.get("no_push"),
         registry=data.get("registry"),
         platform=data.get("platform", "linux/amd64"),
+        build_token=data.get("build_token"),
     )
     job = image_builder.run_remote_builder()
     return {"job": job}
@@ -232,7 +232,6 @@ def change_bench_directory():
     job = Server().change_bench_directory(
         is_primary=data.get("is_primary"),
         directory=data.get("directory"),
-        redis_password=data.get("redis_password"),
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
         redis_connection_string_ip=data.get("redis_connection_string_ip"),
         restart_benches=data.get("restart_benches"),
@@ -297,6 +296,21 @@ def get_docker_image_size(image_tag: str):
     return {"size": size}
 
 
+@application.route("/server/push-images", methods=["POST"])
+def push_docker_images_to_registry():
+    data = request.json
+    job = Server().push_images_to_registry(
+        images=data.get("images"), registry_settings=data.get("registry_settings")
+    )
+    return {"job": job}
+
+
+@application.route("/server/remove-localhost-redis-bind", methods=["POST"])
+def remove_localhost_redis_bind():
+    job = Server().remove_redis_localhost_bind()
+    return {"job": job}
+
+
 @application.route("/server/reclaimable-size", methods=["GET"])
 def get_reclaimable_size():
     return Server().get_reclaimable_size()
@@ -309,26 +323,32 @@ def pull_docker_images():
     return {"job": job}
 
 
+@application.route("/server/update-nginx-access", methods=["POST"])
+def update_nginx_ip_access():
+    data = request.json
+    job = Server().update_nginx_access(
+        ip_accept=data.get("ip_accept", []),
+        ip_drop=data.get("ip_drop", []),
+    )
+    return {"job": job}
+
+
 @application.route("/nfs/add-to-acl", methods=["POST"])
 def add_to_acl():
     data = request.json
     Server().add_to_acl(
-        primary_server_private_ip=data.get("primary_server_private_ip"),
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
-        shared_directory=data.get("shared_directory"),
     )
-    return {"shared_directory": f"/home/frappe/nfs/{data.get('private_ip')}"}
+    return {"shared_directory": "/home/frappe/shared"}
 
 
 @application.route("/nfs/remove-from-acl", methods=["POST"])
 def remove_from_acl():
     data = request.json
     Server().remove_from_acl(
-        primary_server_private_ip=data.get("primary_server_private_ip"),
         secondary_server_private_ip=data.get("secondary_server_private_ip"),
-        shared_directory=data.get("shared_directory"),
     )
-    return {"shared_directory": f"/home/frappe/nfs/{data.get('private_ip')}"}
+    return {"shared_directory": "/home/frappe/shared"}
 
 
 @application.route("/nfs/share-sites", methods=["POST"])
@@ -448,16 +468,6 @@ def get_log(bench, site, log):
     return {log: Server().benches[bench].sites[site].retrieve_log(log)}
 
 
-@application.route("/security/ssh_session_logs")
-def get_ssh_session_logs():
-    return {"logs": Security().ssh_session_logs}
-
-
-@application.route("/security/retrieve_ssh_session_log/<string:filename>")
-def retrieve_ssh_session_log(filename):
-    return {"log_details": Security().retrieve_ssh_session_log(filename)}
-
-
 @application.route("/benches/<string:bench>/sites/<string:site>/sid", methods=["GET", "POST"])
 @validate_bench_and_site
 def get_site_sid(bench, site):
@@ -484,13 +494,6 @@ def archive_bench(bench):
 def restart_bench(bench):
     data = request.json
     job = Server().benches[bench].restart_job(**data)
-    return {"job": job}
-
-
-@application.route("/server/set-redis-password", methods=["POST"])
-def set_redis_password():
-    data = request.json
-    job = Server().set_redis_password(data.get("redis_password"))
     return {"job": job}
 
 
@@ -648,7 +651,10 @@ def complete_setup_wizard(bench, site):
 
 @application.route("/benches/<string:bench>/sites/<string:site>/optimize", methods=["POST"])
 def optimize_tables(bench, site):
-    job = Server().benches[bench].sites[site].optimize_tables_job()
+    # check if table name has been passed
+    data = request.json or {}
+    tables = data.get("tables")
+    job = Server().benches[bench].sites[site].optimize_tables_job(tables=tables)
     return {"job": job}
 
 
@@ -666,7 +672,8 @@ def install_app_site(bench, site):
 )
 @validate_bench_and_site
 def uninstall_app_site(bench, site, app):
-    job = Server().benches[bench].sites[site].uninstall_app_job(app)
+    data = request.json or {}
+    job = Server().benches[bench].sites[site].uninstall_app_job(app, data.get("offsite", {}))
     return {"job": job}
 
 
@@ -976,7 +983,11 @@ def update_site_recover(bench, site):
 @validate_bench
 def archive_site(bench, site):
     data = request.json
-    job = Server().benches[bench].archive_site(site, data["mariadb_root_password"], data.get("force"))
+    job = (
+        Server()
+        .benches[bench]
+        .archive_site(site, data["mariadb_root_password"], data.get("force"), data.get("offsite", {}))
+    )
     return {"job": job}
 
 
@@ -1062,7 +1073,9 @@ def site_create_database_access_credentials(bench, site):
         Server()
         .benches[bench]
         .sites[site]
-        .create_database_access_credentials(data["mode"], data["mariadb_root_password"])
+        .create_database_access_credentials(
+            mariadb_root_password=data.get("mariadb_root_password"),
+        )
     )
 
 
@@ -1153,6 +1166,19 @@ def proxy_add_upstream_site(upstream):
     return {"job": job}
 
 
+@application.route("/proxy/upstreams/<string:primary_upstream>/auto-scale-site", methods=["POST"])
+def proxy_add_auto_scale_site_to_upstream(primary_upstream):
+    data = request.json
+    job = Proxy().add_auto_scale_sites_to_upstream(primary_upstream, data["secondary_upstreams"])
+    return {"job": job}
+
+
+@application.route("/proxy/upstreams/<string:primary_upstream>/remove-auto-scale-site", methods=["POST"])
+def proxy_remove_auto_scale_site_to_upstream(primary_upstream):
+    job = Proxy().remove_auto_scale_site_from_upstream(primary_upstream)
+    return {"job": job}
+
+
 @application.route("/proxy/upstreams/<string:upstream>/domains", methods=["POST"])
 def proxy_add_upstream_site_domain(upstream):
     data = request.json
@@ -1237,6 +1263,33 @@ def physical_restore_database():
         restore_specific_tables=data.get("restore_specific_tables", False),
         tables_to_restore=data.get("tables_to_restore", []),
     ).create_restore_job()
+    return {"job": job}
+
+
+@application.route("/database/update-schema-sizes", methods=["POST"])
+def update_schema_sizes():
+    data = request.json
+    private_ip = data.get("private_ip")
+    mariadb_root_password = data.get("mariadb_root_password")
+    io_ops_limit = data.get("io_ops_limit", 200)
+    concurrency = data.get("concurrency", 20)
+    job = DatabaseServer().update_schema_sizes_job(
+        private_ip=private_ip,
+        mariadb_root_password=mariadb_root_password,
+        io_ops_limit=io_ops_limit,
+        concurrency=concurrency,
+    )
+    return {"job": job}
+
+
+@application.route("/database/flush-tables", methods=["POST"])
+def flush_tables():
+    data = request.json
+    assert "private_ip" in data, "private_ip is required"
+    assert "mariadb_root_password" in data, "mariadb_root_password is required"
+    job = DatabaseServer().flush_tables_job(
+        private_ip=data["private_ip"], mariadb_root_password=data["mariadb_root_password"]
+    )
     return {"job": job}
 
 

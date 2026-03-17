@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import string
 import tempfile
@@ -16,6 +17,7 @@ from random import choices
 from textwrap import indent
 from typing import TYPE_CHECKING, TypedDict
 from shlex import quote
+from urllib.parse import urlparse
 from filelock import FileLock
 
 import requests
@@ -57,6 +59,7 @@ class Bench(Base):
         self.bench_config_file = os.path.join(self.directory, "config.json")
         self.config_file = os.path.join(self.directory, "sites", "common_site_config.json")
         self.host = self.config.get("db_host", "localhost")
+        self.db_port = self.config.get("db_port", 3306)
         self.docker_image = self.bench_config.get("docker_image")
         self.for_devbox = self.bench_config.get("for_devbox", False)
         self.mounts = mounts
@@ -283,7 +286,7 @@ class Bench(Base):
         # execute inside container for devbox
         execute_f = self.execute if not self.for_devbox else self.docker_execute
         for query in queries:
-            command = f'mysql -h {self.host} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
+            command = f'mysql -h {self.host} -P {self.db_port} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
             execute_f(command)
         return database, user, password
 
@@ -298,7 +301,7 @@ class Bench(Base):
         # execute inside container for devbox
         execute_f = self.execute if not self.for_devbox else self.docker_execute
         for query in queries:
-            command = f'mysql -h {self.host} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
+            command = f'mysql -h {self.host} -P {self.db_port} -uroot -p{quote(mariadb_root_password)} -e "{query}"'
             execute_f(command)
 
     def fetch_monitor_data(self):
@@ -483,12 +486,39 @@ class Bench(Base):
         shutil.rmtree(backup_files_directory)
 
     @job("Archive Site")
-    def archive_site(self, name, mariadb_root_password, force):
+    def archive_site(
+        self,
+        name,
+        mariadb_root_password,
+        force,
+        offsite=None,
+    ):
         site_directory = os.path.join(self.sites_directory, name)
+        backups = None
+
         if os.path.exists(site_directory):
-            self.bench_archive_site(name, mariadb_root_password, force)
-        self.setup_nginx()
-        self.server._reload_nginx()
+            if offsite:
+                site = Site(name, self)
+                backup_files = site.backup(with_files=True)
+                uploaded_files = (
+                    site.upload_offsite_backup(
+                        backup_files, offsite, keep_files_locally_after_offsite_backup=False
+                    )
+                    if (backup_files)
+                    else {}
+                )
+                backups = {"backups": backup_files, "offsite": uploaded_files}
+
+            self.bench_archive_site(
+                name,
+                mariadb_root_password,
+                force,
+            )
+
+            self.setup_nginx()
+            self.server._reload_nginx()
+
+        return backups
 
     @step("Bench Setup NGINX")
     def setup_nginx(self):
@@ -588,17 +618,65 @@ class Bench(Base):
         return apps
 
     @step("Update Bench Configuration")
-    def update_config(self, common_site_config, bench_config):
-        self._update_config(common_site_config, bench_config)
+    def update_config(self, common_site_config, bench_config) -> bool:
+        return self._update_config(common_site_config, bench_config)
+
+    def _update_redis_password(self, redis_password: str) -> bool:
+        """
+        Update redis password if not present once added password will not be changed!
+        Release group does not allow changing password anyways
+        """
+        updated = False
+
+        requirepass_line = f"requirepass {redis_password}\n"
+        protected_mode_line = "protected-mode no\n"
+
+        redis_password_pattern = r"^\s*requirepass\s+.*$"
+        protected_mode_pattern = r"^\s*protected-mode\s+.*$"
+
+        for conf_file in [
+            os.path.join(self.config_directory, "redis-queue.conf"),
+            os.path.join(self.config_directory, "redis-cache.conf"),
+        ]:
+            with open(conf_file, "r") as f:
+                content = f.read()
+
+            if not content.endswith("\n"):
+                content += "\n"
+
+            if not re.search(protected_mode_pattern, content, flags=re.MULTILINE):
+                updated = True
+                content += protected_mode_line
+
+            if not re.search(redis_password_pattern, content, flags=re.MULTILINE):
+                updated = True
+                content += requirepass_line
+
+            with open(conf_file, "w") as f:
+                f.write(content)
+
+        return updated
+
+    def _get_redis_passwords(self, common_site_config: dict[str, str | int]) -> str | None:
+        """Get redis cache and queue passwords if they exist,
+        we assume the redis cache and queue password to be same"""
+        redis_cache_url = common_site_config.get("redis_cache")
+        return urlparse(redis_cache_url).password
 
     def _update_config(
         self,
         common_site_config: dict | None = None,
         bench_config: dict | None = None,
-    ):
+    ) -> bool:
+        requires_deploy = False
         if common_site_config:
             new_common_site_config = self.get_config(for_update=True)
             new_common_site_config.update(common_site_config)
+            redis_password = self._get_redis_passwords(common_site_config)
+
+            if redis_password:
+                requires_deploy = self._update_redis_password(redis_password)
+
             self.set_config(new_common_site_config)
 
         if bench_config:
@@ -606,17 +684,21 @@ class Bench(Base):
             new_bench_config.update(bench_config)
             self.set_bench_config(new_bench_config)
 
+        return requires_deploy
+
     @job("Update Bench Configuration", priority="high")
     def update_config_job(self, common_site_config, bench_config):
         old_config = self.bench_config
-        self.update_config(common_site_config, bench_config)
+        requires_update = self.update_config(common_site_config, bench_config)
         self.setup_nginx()
         if self.bench_config.get("single_container"):
             if not self.for_devbox:
                 self.update_supervisor()
             self.update_runtime_limits()
-            if (old_config["web_port"] != bench_config["web_port"]) or (
-                old_config["socketio_port"] != bench_config["socketio_port"]
+            if (
+                requires_update
+                or (old_config["web_port"] != bench_config["web_port"])
+                or (old_config["socketio_port"] != bench_config["socketio_port"])
             ):
                 self.deploy()
         else:
@@ -648,9 +730,19 @@ class Bench(Base):
                 "environment_variables": self.bench_config.get("environment_variables"),
                 "gunicorn_threads_per_worker": self.bench_config.get("gunicorn_threads_per_worker"),
                 "is_code_server_enabled": self.bench_config.get("is_code_server_enabled", False),
+                "custom_workers": self.common_site_config.get("workers", {}),
+                "custom_workers_group": self._get_custom_workers_group(),
+                "host_server": self.server.config["name"],
             },
             supervisor_config,
         )
+
+    def _get_custom_workers_group(self):
+        custom_workers = self.common_site_config.get("workers", {})
+        worker_keys = custom_workers.keys()
+        if worker_keys:
+            return ",".join(f"frappe-bench-{name}-worker" for name in worker_keys)
+        return ""
 
     @step("Generate Docker Compose File")
     def generate_docker_compose_file(self):
@@ -826,10 +918,10 @@ class Bench(Base):
         else:
            _update_limits(True)
 
-    def update_runtime_limits(self):
-        memory_high = self.bench_config.get("memory_high")
-        memory_max = self.bench_config.get("memory_max")
-        memory_swap = self.bench_config.get("memory_swap")
+    def update_runtime_limits(self, multiplier=1.0):
+        memory_high = (self.bench_config.get("memory_high") or 0) * multiplier
+        memory_max = (self.bench_config.get("memory_max") or 0) * multiplier
+        memory_swap = (self.bench_config.get("memory_swap") or 0) * multiplier
         vcpu = self.bench_config.get("vcpu")
         if not any([memory_high, memory_max, memory_swap, vcpu]):
             return
@@ -913,6 +1005,11 @@ class Bench(Base):
     @property
     def bench_config(self) -> dict:
         with open(self.bench_config_file, "r") as f:
+            return json.load(f)
+
+    @property
+    def common_site_config(self):
+        with open(self.config_file, "r") as f:
             return json.load(f)
 
     def set_bench_config(self, value, indent=1):
